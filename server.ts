@@ -97,10 +97,12 @@ async function startServer() {
             },
             {
               text:
-                'Detect every real human person (students, pedestrians, individuals) visible in this video frame. ' +
-                'Strictly ignore non-human objects such as basketball hoop poles, backboards, bleachers, doors, walls, or furniture. ' +
-                'For each real person, return their tight 2D bounding box [ymin, xmin, ymax, xmax] normalized from 0 to 1000, ' +
-                'and set status to "fainted" ONLY if that person is clearly lying collapsed/sprawled horizontally on the floor or ground; ' +
+                'Detect every real foreground or mid-ground human person visible in this video frame. ' +
+                'Strictly ignore non-human objects (monuments, arches, flags, basketball hoop poles, backboards, bleachers, doors, furniture) ' +
+                'and ignore tiny distant background specks smaller than 6% of frame height when a clear foreground person is present. ' +
+                'CRITICAL: Return a tight 2D bounding box [ymin, xmin, ymax, xmax] (normalized 0 to 1000) around the person’s physical body and clothing ONLY — ' +
+                'strictly crop out and exclude any dark ground shadow cast on the pavement or floor. ' +
+                'Set status to "fainted" ONLY if that person is clearly kneeling/collapsing or lying horizontally on the ground/floor; ' +
                 'otherwise set status to "standing".',
             },
           ],

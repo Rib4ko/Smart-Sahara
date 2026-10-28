@@ -1,6 +1,6 @@
 {
-  "summary":  "Revised implementation plan incorporating the 3 technical risk mitigations: 60-frame trailing peak-height hysteresis for Scene-Scale Routing, 1.5-2.0s temporal immobility verification before committing to an immutable faint lock, and IoU > 0.35 + soft EMA blending for asynchronous neural anchor updates.",
-  "updatedAt":  "2026-10-28T19:56:17.961793779Z",
+  "summary":  "Implementation plan to fix bounding box jitter and shadow/background false triggers on the Place du Méchouar outdoor surveillance video using shadow-cropped local ROI tracking, primary foreground filtering, relative baseline collapse geometry, and a sub-1-second indefinite faint lock.",
+  "updatedAt":  "2026-10-28T21:17:15.822612709Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

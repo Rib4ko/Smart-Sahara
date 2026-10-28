@@ -21,7 +21,7 @@ import {
   TARGET_COLOR_CONFIG,
 } from './types/sahra';
 import { VisionCanvas } from './components/VisionCanvas';
-import { LaayouneCorridorMap } from './components/LaayouneCorridorMap';
+import { LaayouneCorridorMap } from './laayoune-map-feature';
 import { PythonCodeInspector } from './components/PythonCodeModal';
 import {
   VISION_ENGINE_PY_SOURCE,

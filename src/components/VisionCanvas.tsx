@@ -14,7 +14,6 @@ import {
   Crosshair,
   Video,
   Lock,
-  Cpu,
   Sparkles,
   Clock,
 } from 'lucide-react';
@@ -62,9 +61,9 @@ interface SimActor {
 }
 
 interface ScaleHysteresisState {
-  trailingMaxHeights: number[]; // Rolling 60-frame window of max subject height ratio (bh / H)
+  trailingMaxHeights: number[]; // Rolling 60-frame window of max subject height ratio
   sessionPeakHeightRatio: number;
-  latchedCloseUpMode: boolean;  // Once Close-Up Mode is detected (>= 0.28), latches true so mid-fall height drop never flips to Crowd Mode
+  latchedSingleForegroundMode: boolean; // Latches true for single-subject foreground videos (like Place du Méchouar or room faint)
 }
 
 interface TrackedPersonState {
@@ -73,13 +72,14 @@ interface TrackedPersonState {
   standingBaselineBbox: [number, number, number, number] | null;
   peakHeight: number;
   baselineTopY: number;
+  standingBottomY: number;
   vx: number;
   vy: number;
   speedPx: number;
   ageFrames: number;
   missedFrames: number;
   standingFrames: number;
-  // Two-Stage Temporal Immobility Gate (1.5-2.0s) -> Indefinite Faint Lock
+  // Sub-1-Second Temporal Collapse Gate -> Indefinite Faint Lock
   collapseCandidateStartMs: number | null;
   isVerifyingFall: boolean;
   verifyProgressSec: number;
@@ -101,21 +101,21 @@ function buildStandingKeypoints(
   stridePhase = 0
 ): PoseKeypoint[] {
   const [bx, by, bw, bh] = bbox;
-  const swing = Math.sin(stridePhase) * 0.04;
+  const swing = Math.sin(stridePhase) * 0.035;
   return [
-    { name: 'nose', x: bx + bw * 0.5, y: by + bh * 0.12, confidence: 0.95 },
-    { name: 'l_shoulder', x: bx + bw * 0.32, y: by + bh * 0.25, confidence: 0.95 },
-    { name: 'r_shoulder', x: bx + bw * 0.68, y: by + bh * 0.25, confidence: 0.95 },
-    { name: 'l_elbow', x: bx + bw * (0.24 - swing), y: by + bh * 0.42, confidence: 0.9 },
-    { name: 'r_elbow', x: bx + bw * (0.76 + swing), y: by + bh * 0.42, confidence: 0.9 },
-    { name: 'l_wrist', x: bx + bw * (0.20 - swing), y: by + bh * 0.56, confidence: 0.88 },
-    { name: 'r_wrist', x: bx + bw * (0.80 + swing), y: by + bh * 0.56, confidence: 0.88 },
-    { name: 'l_hip', x: bx + bw * 0.37, y: by + bh * 0.55, confidence: 0.95 },
-    { name: 'r_hip', x: bx + bw * 0.63, y: by + bh * 0.55, confidence: 0.95 },
-    { name: 'l_knee', x: bx + bw * (0.35 + swing), y: by + bh * 0.75, confidence: 0.92 },
-    { name: 'r_knee', x: bx + bw * (0.65 - swing), y: by + bh * 0.75, confidence: 0.92 },
-    { name: 'l_ankle', x: bx + bw * (0.33 + swing * 1.1), y: by + bh * 0.93, confidence: 0.9 },
-    { name: 'r_ankle', x: bx + bw * (0.67 - swing * 1.1), y: by + bh * 0.93, confidence: 0.9 },
+    { name: 'nose', x: bx + bw * 0.5, y: by + bh * 0.11, confidence: 0.96 },
+    { name: 'l_shoulder', x: bx + bw * 0.33, y: by + bh * 0.24, confidence: 0.96 },
+    { name: 'r_shoulder', x: bx + bw * 0.67, y: by + bh * 0.24, confidence: 0.96 },
+    { name: 'l_elbow', x: bx + bw * (0.25 - swing), y: by + bh * 0.41, confidence: 0.92 },
+    { name: 'r_elbow', x: bx + bw * (0.75 + swing), y: by + bh * 0.41, confidence: 0.92 },
+    { name: 'l_wrist', x: bx + bw * (0.22 - swing), y: by + bh * 0.55, confidence: 0.9 },
+    { name: 'r_wrist', x: bx + bw * (0.78 + swing), y: by + bh * 0.55, confidence: 0.9 },
+    { name: 'l_hip', x: bx + bw * 0.38, y: by + bh * 0.54, confidence: 0.95 },
+    { name: 'r_hip', x: bx + bw * 0.62, y: by + bh * 0.54, confidence: 0.95 },
+    { name: 'l_knee', x: bx + bw * (0.36 + swing), y: by + bh * 0.74, confidence: 0.93 },
+    { name: 'r_knee', x: bx + bw * (0.64 - swing), y: by + bh * 0.74, confidence: 0.93 },
+    { name: 'l_ankle', x: bx + bw * (0.35 + swing * 1.1), y: by + bh * 0.92, confidence: 0.91 },
+    { name: 'r_ankle', x: bx + bw * (0.65 - swing * 1.1), y: by + bh * 0.92, confidence: 0.91 },
   ];
 }
 
@@ -125,24 +125,25 @@ function buildFrozenFloorKeypoints(bbox: [number, number, number, number]): Pose
   const isHorizontal = bw >= bh * 1.05;
 
   if (isHorizontal) {
+    // Horizontal side-lying / sprawled skeleton (head on left/inner side, feet on right side)
     return [
-      { name: 'nose', x: bx + bw * 0.18, y: by + bh * 0.36, confidence: 0.98 },
-      { name: 'l_shoulder', x: bx + bw * 0.30, y: by + bh * 0.28, confidence: 0.98 },
-      { name: 'r_shoulder', x: bx + bw * 0.32, y: by + bh * 0.54, confidence: 0.98 },
-      { name: 'l_elbow', x: bx + bw * 0.42, y: by + bh * 0.18, confidence: 0.95 },
-      { name: 'r_elbow', x: bx + bw * 0.44, y: by + bh * 0.70, confidence: 0.95 },
-      { name: 'l_wrist', x: bx + bw * 0.54, y: by + bh * 0.22, confidence: 0.92 },
-      { name: 'r_wrist', x: bx + bw * 0.56, y: by + bh * 0.78, confidence: 0.92 },
-      { name: 'l_hip', x: bx + bw * 0.56, y: by + bh * 0.36, confidence: 0.98 },
-      { name: 'r_hip', x: bx + bw * 0.56, y: by + bh * 0.58, confidence: 0.98 },
-      { name: 'l_knee', x: bx + bw * 0.74, y: by + bh * 0.34, confidence: 0.96 },
-      { name: 'r_knee', x: bx + bw * 0.74, y: by + bh * 0.64, confidence: 0.96 },
-      { name: 'l_ankle', x: bx + bw * 0.90, y: by + bh * 0.38, confidence: 0.95 },
-      { name: 'r_ankle', x: bx + bw * 0.90, y: by + bh * 0.68, confidence: 0.95 },
+      { name: 'nose', x: bx + bw * 0.14, y: by + bh * 0.42, confidence: 0.98 },
+      { name: 'l_shoulder', x: bx + bw * 0.26, y: by + bh * 0.30, confidence: 0.98 },
+      { name: 'r_shoulder', x: bx + bw * 0.28, y: by + bh * 0.58, confidence: 0.98 },
+      { name: 'l_elbow', x: bx + bw * 0.38, y: by + bh * 0.22, confidence: 0.95 },
+      { name: 'r_elbow', x: bx + bw * 0.40, y: by + bh * 0.74, confidence: 0.95 },
+      { name: 'l_wrist', x: bx + bw * 0.20, y: by + bh * 0.68, confidence: 0.92 },
+      { name: 'r_wrist', x: bx + bw * 0.48, y: by + bh * 0.80, confidence: 0.92 },
+      { name: 'l_hip', x: bx + bw * 0.55, y: by + bh * 0.36, confidence: 0.98 },
+      { name: 'r_hip', x: bx + bw * 0.55, y: by + bh * 0.60, confidence: 0.98 },
+      { name: 'l_knee', x: bx + bw * 0.74, y: by + bh * 0.40, confidence: 0.96 },
+      { name: 'r_knee', x: bx + bw * 0.74, y: by + bh * 0.66, confidence: 0.96 },
+      { name: 'l_ankle', x: bx + bw * 0.91, y: by + bh * 0.46, confidence: 0.95 },
+      { name: 'r_ankle', x: bx + bw * 0.91, y: by + bh * 0.72, confidence: 0.95 },
     ];
   }
 
-  // Foreshortened floor faint pose (head near top of floor box, feet near bottom of floor box, zero jitter)
+  // Foreshortened floor faint pose (head near top of floor box, feet near bottom of floor box)
   return [
     { name: 'nose', x: bx + bw * 0.48, y: by + bh * 0.10, confidence: 0.98 },
     { name: 'l_shoulder', x: bx + bw * 0.35, y: by + bh * 0.20, confidence: 0.98 },
@@ -221,7 +222,6 @@ function boxIoU(a: [number, number, number, number], b: [number, number, number,
   return interArea / Math.max(1, areaA + areaB - interArea);
 }
 
-// Measures how much of box B is contained inside box A (prevents sub-boxes on limbs/torso!)
 function boxContainmentRatio(
   outer: [number, number, number, number],
   inner: [number, number, number, number]
@@ -245,18 +245,310 @@ function centerDist(a: [number, number, number, number], b: [number, number, num
   return Math.hypot(ax - bx, ay - by);
 }
 
-// Containment Non-Maximum Suppression: Suppresses any nested or overlapping sub-boxes
-function applyContainmentNMS<T extends { bbox: [number, number, number, number]; score: number }>(
-  items: T[],
-  isCloseUpMode: boolean
-): T[] {
-  if (items.length <= 1) return items;
-  const sorted = [...items].sort(
-    (a, b) => b.bbox[2] * b.bbox[3] * (0.5 + b.score) - a.bbox[2] * a.bbox[3] * (0.5 + a.score)
+// ============================================================================
+// SHADOW-CROPPING & LOCAL FOREGROUND BODY SEGMENTATION ENGINE
+// Strips cast ground shadows (e.g. left shadow on Place du Méchouar plaza)
+// and tightly bounds the physical human body even in flowing robes (djellaba).
+// ============================================================================
+
+function sampleLocalGroundBackground(
+  data: Uint8ClampedArray,
+  gray: Uint8Array,
+  GW: number,
+  GH: number,
+  gx1: number,
+  gy1: number,
+  gx2: number,
+  gy2: number
+): { bgR: number; bgG: number; bgB: number; bgLuma: number } {
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let sumL = 0;
+  let count = 0;
+
+  const yStart = Math.max(12, Math.floor(gy1));
+  const yEnd = Math.min(GH - 8, Math.ceil(gy2));
+  const leftX = Math.max(6, Math.floor(gx1 - 6));
+  const rightX = Math.min(GW - 6, Math.ceil(gx2 + 6));
+
+  for (let y = yStart; y <= yEnd; y += 2) {
+    for (const x of [leftX, Math.max(6, leftX - 3), rightX, Math.min(GW - 6, rightX + 3)]) {
+      const pIdx = y * GW + x;
+      const luma = gray[pIdx];
+      // Exclude deep cast shadow pixels when sampling the sunlit ground color
+      if (luma >= 95 && luma <= 215) {
+        const idx = pIdx * 4;
+        sumR += data[idx];
+        sumG += data[idx + 1];
+        sumB += data[idx + 2];
+        sumL += luma;
+        count++;
+      }
+    }
+  }
+
+  if (count === 0) {
+    return { bgR: 168, bgG: 162, bgB: 152, bgLuma: 162 };
+  }
+
+  return {
+    bgR: sumR / count,
+    bgG: sumG / count,
+    bgB: sumB / count,
+    bgLuma: sumL / count,
+  };
+}
+
+/**
+ * Crops out any horizontal ground shadow tail included inside a detector bounding box
+ * (such as the dark left shadow cast on the Place du Méchouar concrete plaza).
+ */
+function cropCastShadowFromBox(
+  bbox: [number, number, number, number],
+  data: Uint8ClampedArray,
+  gray: Uint8Array,
+  GW: number,
+  GH: number,
+  W: number,
+  H: number
+): [number, number, number, number] {
+  const scaleX = W / GW;
+  const scaleY = H / GH;
+  const [bx, by, bw, bh] = bbox;
+
+  const gx1 = Math.max(4, Math.floor(bx / scaleX));
+  const gy1 = Math.max(4, Math.floor(by / scaleY));
+  const gx2 = Math.min(GW - 4, Math.ceil((bx + bw) / scaleX));
+  const gy2 = Math.min(GH - 4, Math.ceil((by + bh) / scaleY));
+
+  if (gx2 - gx1 < 6 || gy2 - gy1 < 6) return bbox;
+
+  const { bgR, bgG, bgB, bgLuma } = sampleLocalGroundBackground(
+    data,
+    gray,
+    GW,
+    GH,
+    gx1,
+    gy1,
+    gx2,
+    gy2
   );
 
-  if (isCloseUpMode) {
-    // In Close-Up Mode, merge/keep only the primary human subject (eliminates 12-box limb fragmentation!)
+  // Check if each column has non-shadow physical body pixels
+  const colBodyCounts = new Int16Array(gx2 - gx1 + 1);
+  let totalBrightOrChromaticBody = 0;
+
+  for (let x = gx1; x <= gx2; x++) {
+    let bodyInCol = 0;
+    for (let y = gy1; y <= gy2; y++) {
+      const pIdx = y * GW + x;
+      const idx = pIdx * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const luma = gray[pIdx];
+      const [, s] = rgbToOpenCvHsv(r, g, b);
+
+      // Ground shadow check: darker than ground (luma < bgLuma * 0.77) and low saturation (neutral shadow)
+      const isGroundShadow = luma < bgLuma * 0.77 && s < 78;
+      if (isGroundShadow) continue;
+
+      const colorDist = Math.hypot(r - bgR, g - bgG, b - bgB);
+      const lumaDiff = Math.abs(luma - bgLuma);
+
+      // Bright garment (cream/white djellaba) or warm/saturated clothing/headwrap/skin
+      if (luma > bgLuma + 14 || (colorDist > 22 && lumaDiff > 12) || s > 68) {
+        bodyInCol++;
+        totalBrightOrChromaticBody++;
+      }
+    }
+    colBodyCounts[x - gx1] = bodyInCol;
+  }
+
+  // Only trim columns if we have a clear body mass (prevents over-cropping on dark indoor clothes)
+  if (totalBrightOrChromaticBody < 14) {
+    return bbox;
+  }
+
+  const minColHits = Math.max(1, Math.floor((gy2 - gy1) * 0.10));
+  let trimLeft = gx1;
+  let trimRight = gx2;
+
+  while (trimLeft < trimRight - 4 && colBodyCounts[trimLeft - gx1] < minColHits) {
+    trimLeft++;
+  }
+  while (trimRight > trimLeft + 4 && colBodyCounts[trimRight - gx1] < minColHits) {
+    trimRight--;
+  }
+
+  const newBx = Math.max(6, (trimLeft - 0.5) * scaleX);
+  const newBw = Math.min(W - newBx - 6, Math.max(24, (trimRight - trimLeft + 1.5) * scaleX));
+  return [newBx, by, newBw, bh];
+}
+
+/**
+ * Extracts the tight, shadow-cropped human body bounding box inside a local ROI.
+ * Works both for outdoor sunlit plazas (Place du Méchouar cream djellaba + yellow headwrap,
+ * strictly ignoring the dark ground shadow and background flags) and indoor floors.
+ */
+function extractShadowCroppedBodyInROI(
+  anchorBox: [number, number, number, number] | null,
+  standingBottomY: number | null,
+  data: Uint8ClampedArray,
+  gray: Uint8Array,
+  GW: number,
+  GH: number,
+  W: number,
+  H: number
+): { bbox: [number, number, number, number]; foreshortenedFloor: boolean; score: number } | null {
+  const scaleX = W / GW;
+  const scaleY = H / GH;
+
+  // Define search region in offscreen grid coordinates (GW x GH)
+  // Exclude upper horizon (y < 44% where monument arch & waving flags live) and CCTV overlays
+  let sx1 = Math.floor(GW * 0.25);
+  let sx2 = Math.floor(GW * 0.76);
+  let sy1 = Math.floor(GH * 0.46);
+  let sy2 = Math.floor(GH * 0.91);
+
+  if (anchorBox) {
+    const [ax, ay, aw, ah] = anchorBox;
+    const padX = Math.max(W * 0.10, aw * 0.65);
+    const padYTop = Math.max(H * 0.06, ah * 0.35);
+    const padYBot = Math.max(H * 0.05, ah * 0.35);
+
+    sx1 = Math.max(Math.floor(GW * 0.16), Math.floor((ax - padX) / scaleX));
+    sx2 = Math.min(Math.floor(GW * 0.84), Math.ceil((ax + aw + padX) / scaleX));
+    sy1 = Math.max(Math.floor(GH * 0.44), Math.floor((ay - padYTop) / scaleY));
+    const maxBotPx = standingBottomY
+      ? Math.max(ay + ah + padYBot, standingBottomY + H * 0.03)
+      : ay + ah + padYBot;
+    sy2 = Math.min(Math.floor(GH * 0.91), Math.ceil(maxBotPx / scaleY));
+  }
+
+  if (sx2 - sx1 < 8 || sy2 - sy1 < 8) return null;
+
+  const { bgR, bgG, bgB, bgLuma } = sampleLocalGroundBackground(
+    data,
+    gray,
+    GW,
+    GH,
+    sx1,
+    sy1,
+    sx2,
+    sy2
+  );
+
+  // Pass 1: Detect non-shadow foreground body pixels (bright djellaba/robe, headwrap, skin, or saturated clothing)
+  const xs: number[] = [];
+  const ys: number[] = [];
+
+  for (let y = sy1; y <= sy2; y++) {
+    for (let x = sx1; x <= sx2; x++) {
+      // Mask bottom-right CCTV "CAM 04" text region
+      if (y > GH * 0.90 && x > GW * 0.80) continue;
+
+      const pIdx = y * GW + x;
+      const idx = pIdx * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const luma = gray[pIdx];
+      const [h, s] = rgbToOpenCvHsv(r, g, b);
+
+      // STRICT SHADOW REJECTION: Cast ground shadows on sunlit plazas are darker than bgLuma * 0.78 with low saturation
+      if (luma < bgLuma * 0.78 && s < 78) {
+        continue;
+      }
+
+      const colorDist = Math.hypot(r - bgR, g - bgG, b - bgB);
+
+      // 1. Bright/cream/white clothing contrasting against medium plaza concrete (e.g. djellaba in Place du Méchouar)
+      const isBrightGarment = luma > bgLuma + 16 && luma >= 168;
+      // 2. Warm/saturated clothing or headwrap/skin contrasting against gray concrete
+      const isChromaticBody =
+        s >= 62 && luma >= bgLuma * 0.72 && colorDist >= 24;
+      // 3. Indoor teal/colored top on linoleum floor
+      const isIndoorTealTop =
+        s > 95 && luma > 55 && luma < 198 && h >= 75 && h <= 130;
+
+      if (isBrightGarment || isChromaticBody || isIndoorTealTop) {
+        xs.push(x);
+        ys.push(y);
+      }
+    }
+  }
+
+  // Fallback for indoor close-up dark clothing on bright linoleum floor ONLY when no outdoor bright garment exists
+  if (xs.length < 18 && bgLuma >= 150) {
+    const ix1 = Math.max(sx1, Math.floor(GW * 0.32));
+    const ix2 = Math.min(sx2, Math.floor(GW * 0.66));
+    const iy1 = Math.max(sy1, Math.floor(GH * 0.48));
+    const iy2 = Math.min(sy2, Math.floor(GH * 0.89));
+
+    for (let y = iy1; y <= iy2; y++) {
+      for (let x = ix1; x <= ix2; x++) {
+        const pIdx = y * GW + x;
+        const luma = gray[pIdx];
+        // Deep dark leggings/clothing (luma < 52) in central indoor aisle
+        if (luma < 52) {
+          xs.push(x);
+          ys.push(y);
+        }
+      }
+    }
+  }
+
+  if (xs.length < 16) return null;
+
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+
+  // Use 4th to 96th percentiles to reject isolated speckle noise and hug the physical body tightly
+  const xMin = xs[Math.floor(xs.length * 0.04)];
+  const xMax = xs[Math.min(xs.length - 1, Math.floor(xs.length * 0.96))];
+  const yMin = ys[Math.floor(ys.length * 0.04)];
+  const yMax = ys[Math.min(ys.length - 1, Math.floor(ys.length * 0.96))];
+
+  const spanW = xMax - xMin + 1;
+  const spanH = yMax - yMin + 1;
+  if (spanW < 3 || spanH < 3) return null;
+
+  const padPxX = Math.max(8, spanW * scaleX * 0.10);
+  const padPxY = Math.max(8, spanH * scaleY * 0.10);
+
+  const bx = Math.max(8, xMin * scaleX - padPxX);
+  const by = Math.max(8, yMin * scaleY - padPxY);
+  const bw = Math.min(W - bx - 8, Math.max(32, spanW * scaleX + padPxX * 2));
+  const bh = Math.min(H - by - 8, Math.max(32, spanH * scaleY + padPxY * 2));
+
+  if (bw > W * 0.60 || bh > H * 0.85) return null;
+
+  const aspect = bw / Math.max(1, bh);
+  return {
+    bbox: [bx, by, bw, bh],
+    foreshortenedFloor: aspect >= 1.15 || by > H * 0.70,
+    score: 0.86,
+  };
+}
+
+// Containment Non-Maximum Suppression
+function applyContainmentNMS<T extends { bbox: [number, number, number, number]; score: number }>(
+  items: T[],
+  isSingleForegroundMode: boolean
+): T[] {
+  if (items.length <= 1) return items;
+
+  // Sort by foreground prominence (lower bottom Y + area + score)
+  const sorted = [...items].sort((a, b) => {
+    const scoreA = a.bbox[2] * a.bbox[3] * (0.5 + a.score) * (a.bbox[1] + a.bbox[3]);
+    const scoreB = b.bbox[2] * b.bbox[3] * (0.5 + b.score) * (b.bbox[1] + b.bbox[3]);
+    return scoreB - scoreA;
+  });
+
+  if (isSingleForegroundMode) {
+    // Keep strictly the primary foreground subject (ignores tiny background walkers & eliminates multi-box splits)
     return [sorted[0]];
   }
 
@@ -295,14 +587,13 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
   const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const lastVideoTimeRef = useRef<number>(-1);
   const prevGrayRef = useRef<Uint8Array | null>(null);
-  const bgModelRef = useRef<Float32Array | null>(null);
   const lastAlertTimeRef = useRef<number>(0);
 
   // 60-Frame Peak-Height Hysteresis Router State
   const scaleHysteresisRef = useRef<ScaleHysteresisState>({
     trailingMaxHeights: [],
     sessionPeakHeightRatio: 0,
-    latchedCloseUpMode: false,
+    latchedSingleForegroundMode: false,
   });
 
   // Server-side Pre-Trained Neural Teacher state with Snapshot Drift Tracking
@@ -315,7 +606,9 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
   const nextTrackIdRef = useRef<number>(1);
 
   const [poseModelStatus, setPoseModelStatus] = useState<'loading' | 'ready' | 'fallback'>('loading');
-  const [sceneScaleLabel, setSceneScaleLabel] = useState<'Close-Up Mode' | 'Wide Crowd Mode'>('Close-Up Mode');
+  const [sceneScaleLabel, setSceneScaleLabel] = useState<'Foreground Subject Mode' | 'Wide Crowd Mode'>(
+    'Foreground Subject Mode'
+  );
   const [webcamError, setWebcamError] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
@@ -330,7 +623,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
   const simActorsRef = useRef<SimActor[]>([
     {
       id: 1,
-      name: 'Student #1',
+      name: 'Person #1',
       x: 220,
       y: 265,
       vx: 0.8,
@@ -342,7 +635,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     },
     {
       id: 2,
-      name: 'Student #2',
+      name: 'Person #2',
       x: 520,
       y: 285,
       vx: -0.65,
@@ -354,7 +647,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     },
     {
       id: 3,
-      name: 'Student #3',
+      name: 'Person #3',
       x: 760,
       y: 255,
       vx: -0.5,
@@ -366,7 +659,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     },
   ]);
 
-  // Initialize Pre-Trained Neural Models: PoseLandmarker + EfficientDet-Lite0 ObjectDetector
+  // Initialize Pre-Trained Neural Models: PoseLandmarker Full (with Lite fallback) + EfficientDet-Lite0
   useEffect(() => {
     let cancelled = false;
     async function initPreTrainedModels() {
@@ -375,8 +668,22 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
         );
 
-        const [landmarker, detector] = await Promise.all([
-          PoseLandmarker.createFromOptions(vision, {
+        const landmarkerFull = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numPoses: 4,
+          minPoseDetectionConfidence: 0.32,
+          minPosePresenceConfidence: 0.32,
+          minTrackingConfidence: 0.32,
+        }).catch(() => null);
+
+        const landmarker =
+          landmarkerFull ||
+          (await PoseLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath:
                 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
@@ -384,22 +691,22 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             },
             runningMode: 'VIDEO',
             numPoses: 4,
-            minPoseDetectionConfidence: 0.35,
-            minPosePresenceConfidence: 0.35,
-            minTrackingConfidence: 0.35,
-          }).catch(() => null),
-          ObjectDetector.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite',
-              delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            scoreThreshold: 0.3,
-            maxResults: 25,
-            categoryAllowlist: ['person'],
-          }).catch(() => null),
-        ]);
+            minPoseDetectionConfidence: 0.32,
+            minPosePresenceConfidence: 0.32,
+            minTrackingConfidence: 0.32,
+          }).catch(() => null));
+
+        const detector = await ObjectDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          scoreThreshold: 0.32,
+          maxResults: 25,
+          categoryAllowlist: ['person'],
+        }).catch(() => null);
 
         if (!cancelled) {
           poseLandmarkerRef.current = landmarker;
@@ -422,14 +729,13 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     tracksRef.current = [];
     nextTrackIdRef.current = 1;
     prevGrayRef.current = null;
-    bgModelRef.current = null;
     lastNeuralTimeRef.current = 0;
     hasNeuralCalibrationRef.current = false;
     snapshotTrackPositionsRef.current = {};
     scaleHysteresisRef.current = {
       trailingMaxHeights: [],
       sessionPeakHeightRatio: 0,
-      latchedCloseUpMode: false,
+      latchedSingleForegroundMode: false,
     };
     setManualFallOverride(false);
     setManualSecurityOverride(false);
@@ -442,7 +748,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     });
   }, []);
 
-  // Reconcile Server-Side Neural Detections (/api/analyze-frame) with IoU > 0.35 Gating & Optical-Flow Drift Compensation
+  // Reconcile Server-Side Neural Detections (/api/analyze-frame) with Shadow-Cropping & Spatial Gating
   const reconcileServerNeuralDetections = useCallback(
     (
       people: Array<{ box_2d: number[]; status: string }>,
@@ -467,7 +773,10 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         const by = Math.max(6, (ymin / 1000) * H);
         const bw = Math.min(W - bx - 6, Math.max(18, ((xmax - xmin) / 1000) * W));
         const bh = Math.min(H - by - 6, Math.max(20, ((ymax - ymin) / 1000) * H));
-        if (bw > W * 0.78 || bh > H * 0.96) return;
+        if (bw > W * 0.75 || bh > H * 0.95) return;
+
+        // Ignore tiny distant background walkers (e.g. far-left speck in Place du Méchouar) when a foreground person exists
+        if (bh < H * 0.09 && by + bh < H * 0.55 && people.length <= 3) return;
 
         const hRatio = bh / H;
         if (hRatio > maxReturnedHeightRatio) maxReturnedHeightRatio = hRatio;
@@ -475,21 +784,23 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         rawBoxes.push({
           bbox: [bx, by, bw, bh],
           status: String(person.status).toLowerCase(),
-          score: 0.9,
+          score: 0.92,
         });
       });
 
       if (rawBoxes.length === 0) return;
 
-      // Update Hysteresis State if a single close-up person (height >= 28% or 1 person in room) is returned
       const hyst = scaleHysteresisRef.current;
-      if (maxReturnedHeightRatio >= 0.28 || (rawBoxes.length === 1 && maxReturnedHeightRatio >= 0.20)) {
-        hyst.latchedCloseUpMode = true;
+      if (
+        rawBoxes.length <= 2 &&
+        (maxReturnedHeightRatio >= 0.11 || rawBoxes[0].bbox[2] / W >= 0.12)
+      ) {
+        hyst.latchedSingleForegroundMode = true;
         hyst.sessionPeakHeightRatio = Math.max(hyst.sessionPeakHeightRatio, maxReturnedHeightRatio);
       }
 
-      const isCloseUp = hyst.latchedCloseUpMode;
-      const filteredBoxes = applyContainmentNMS(rawBoxes, isCloseUp);
+      const isSingleMode = hyst.latchedSingleForegroundMode;
+      const filteredBoxes = applyContainmentNMS(rawBoxes, isSingleMode);
 
       hasNeuralCalibrationRef.current = true;
       const tracks = tracksRef.current;
@@ -500,7 +811,6 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         const [bx, by, bw, bh] = item.bbox;
         const isFaintedStatus = item.status === 'fainted';
 
-        // Find best matching existing track using IoU > 0.35 or close proximity
         let bestTrack: TrackedPersonState | null = null;
         let bestIoU = 0;
         let bestDist = Infinity;
@@ -508,7 +818,6 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         tracks.forEach((tr) => {
           if (matchedTrackIds.has(tr.id)) return;
 
-          // Compensate for optical-flow drift accumulated since the snapshot was captured!
           const origPos = snapPos[tr.id];
           const driftX = origPos ? tr.bbox[0] - origPos[0] : 0;
           const driftY = origPos ? tr.bbox[1] - origPos[1] : 0;
@@ -522,13 +831,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
           const iou = boxIoU(tr.bbox, compensatedBox);
           const dist = centerDist(tr.bbox, compensatedBox);
 
-          if (isCloseUp) {
+          // Enforce a spatial distance gate even in single-subject mode so distant false boxes can NEVER pull the track!
+          if (isSingleMode && dist < W * 0.25) {
             bestTrack = tr;
-            bestIoU = Math.max(0.5, iou);
+            bestIoU = Math.max(0.45, iou);
           } else if (iou > 0.35 && iou > bestIoU) {
             bestIoU = iou;
             bestTrack = tr;
-          } else if (bestIoU === 0 && dist < 52 && dist < bestDist) {
+          } else if (bestIoU === 0 && dist < 56 && dist < bestDist) {
             bestDist = dist;
             bestTrack = tr;
           }
@@ -551,9 +861,8 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             bh,
           ];
 
-          // Soft EMA interpolation (alpha = 0.25) so boxes NEVER snap or jump on screen!
           if (!tr.isFallen || !tr.faintLockedBbox) {
-            const blendAlpha = bestIoU > 0.35 ? 0.28 : 0.20;
+            const blendAlpha = bestIoU > 0.35 ? 0.25 : 0.18;
             tr.bbox = [
               tr.bbox[0] * (1 - blendAlpha) + targetBox[0] * blendAlpha,
               tr.bbox[1] * (1 - blendAlpha) + targetBox[1] * blendAlpha,
@@ -562,17 +871,16 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             ];
           }
 
-          if (isFaintedStatus) {
-            // Neural model confirmed person is lying collapsed on the floor -> commit Indefinite Lock!
+          if (isFaintedStatus && (bw / Math.max(1, bh) >= 1.05 || by > H * 0.45)) {
             tr.isFallen = true;
             tr.isVerifyingFall = false;
             tr.neuralFaintConfirmed = true;
-            tr.faintLockedBbox = tr.faintLockedBbox || [...item.bbox];
+            tr.faintLockedBbox = tr.faintLockedBbox || [...tr.bbox];
             tr.faintStartTime = tr.faintStartTime || now;
             tr.faintReason = 'Floor Faint Confirmed & Locked Indefinitely';
             tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.faintLockedBbox);
           }
-        } else if (!isCloseUp || tracks.length === 0) {
+        } else if (!isSingleMode || tracks.length === 0) {
           if (tracks.length < 28) {
             const id = nextTrackIdRef.current++;
             const newTrack: TrackedPersonState = {
@@ -581,13 +889,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               standingBaselineBbox: isFaintedStatus ? null : [...item.bbox],
               peakHeight: isFaintedStatus ? 0 : bh,
               baselineTopY: isFaintedStatus ? H : by,
+              standingBottomY: by + bh,
               vx: 0,
               vy: 0,
               speedPx: 0,
               ageFrames: 4,
               missedFrames: 0,
               standingFrames: isFaintedStatus ? 0 : 4,
-              collapseCandidateStartMs: isFaintedStatus ? now - 2000 : null,
+              collapseCandidateStartMs: isFaintedStatus ? now - 1000 : null,
               isVerifyingFall: false,
               verifyProgressSec: 0,
               isFallen: isFaintedStatus,
@@ -609,9 +918,8 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         }
       });
 
-      // CRITICAL: Never delete any track that is already faint-locked (`tr.isFallen`) or in Close-Up Mode!
       tracksRef.current = tracks.filter(
-        (tr) => tr.isFallen || isCloseUp || matchedTrackIds.has(tr.id)
+        (tr) => tr.isFallen || isSingleMode || matchedTrackIds.has(tr.id)
       );
     },
     []
@@ -708,13 +1016,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     if (videoEl && !Number.isNaN(newTime)) {
       videoEl.currentTime = newTime;
       lastNeuralTimeRef.current = 0;
-      if (newTime < 0.5 && !manualFallOverride) {
+      if (newTime < 0.8 && !manualFallOverride) {
         tracksRef.current.forEach((tr) => {
           tr.isFallen = false;
           tr.isVerifyingFall = false;
           tr.faintLockedBbox = null;
           tr.faintStartTime = null;
           tr.collapseCandidateStartMs = null;
+          tr.neuralFaintConfirmed = false;
         });
       }
     }
@@ -818,16 +1127,15 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             if (inputSource === 'upload' && videoEl.duration) {
               setVideoProgress(videoEl.currentTime);
               setVideoDuration(videoEl.duration);
-              // Unlock only if video loops back to very beginning (t < 0.25s) so user can watch standing -> faint again
-              if (videoEl.currentTime < 0.25 && !manualFallOverride) {
+              // When video loops back to 00:00, reset faint lock so user can watch the standing -> faint transition cleanly every loop!
+              if (videoEl.currentTime < 0.35 && !manualFallOverride) {
                 tracksRef.current.forEach((tr) => {
-                  if (!tr.neuralFaintConfirmed) {
-                    tr.isFallen = false;
-                    tr.isVerifyingFall = false;
-                    tr.faintLockedBbox = null;
-                    tr.faintStartTime = null;
-                    tr.collapseCandidateStartMs = null;
-                  }
+                  tr.isFallen = false;
+                  tr.isVerifyingFall = false;
+                  tr.faintLockedBbox = null;
+                  tr.faintStartTime = null;
+                  tr.collapseCandidateStartMs = null;
+                  tr.neuralFaintConfirmed = false;
                 });
               }
             }
@@ -840,9 +1148,32 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             const scaleX = W / GW;
             const scaleY = H / GH;
 
+            // Precompute grayscale & motion mask (excluding CCTV timestamp & sky/flag zones)
+            const numPixels = GW * GH;
+            const gray = new Uint8Array(numPixels);
+            const motionMask = new Uint8Array(numPixels);
+            const prevGray = prevGrayRef.current;
+
+            for (let y = 0; y < GH; y++) {
+              for (let x = 0; x < GW; x++) {
+                const pIdx = y * GW + x;
+                const idx = pIdx * 4;
+                const luma = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
+                gray[pIdx] = luma;
+
+                // Ignore top sky/waving flags (y < 14) and bottom-right CCTV "CAM 04" text
+                if (y >= 14 && y < GH - 8 && !(y > GH * 0.88 && x > GW * 0.78)) {
+                  const mDiff = prevGray ? Math.abs(luma - prevGray[pIdx]) : 0;
+                  if (mDiff >= 16) {
+                    motionMask[pIdx] = 1;
+                  }
+                }
+              }
+            }
+            prevGrayRef.current = gray;
+
             // =========================================================================
             // 1. ASYNC NEURAL GROUND-TRUTH SNAPSHOT (/api/analyze-frame)
-            // Captures track positions at snapshot time for IoU > 0.35 drift compensation
             // =========================================================================
             if (!neuralBusyRef.current && now - lastNeuralTimeRef.current > 1800) {
               neuralBusyRef.current = true;
@@ -875,7 +1206,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             }
 
             // =========================================================================
-            // 2. CLIENT-SIDE MEDIAPIPE POSE LANDMARKER & FULL-FRAME OBJECT DETECTOR
+            // 2. CLIENT-SIDE MEDIAPIPE POSE LANDMARKER & OBJECT DETECTOR + SHADOW CROP
             // =========================================================================
             interface FrameCandidate {
               bbox: [number, number, number, number];
@@ -923,7 +1254,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                       keypointMap.forEach(({ idx, name }) => {
                         const pt = lm[idx];
                         const vis = pt?.visibility ?? 0;
-                        if (pt && vis >= 0.45 && pt.x >= 0.02 && pt.x <= 0.98 && pt.y >= 0.02 && pt.y <= 0.98) {
+                        if (
+                          pt &&
+                          vis >= 0.42 &&
+                          pt.x >= 0.02 &&
+                          pt.x <= 0.98 &&
+                          pt.y >= 0.02 &&
+                          pt.y <= 0.98
+                        ) {
                           highConfCount++;
                           if (pt.x < minX) minX = pt.x;
                           if (pt.x > maxX) maxX = pt.x;
@@ -939,15 +1277,25 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                       });
 
                       if (highConfCount >= 5) {
-                        const padX = Math.max(0.02, (maxX - minX) * 0.14);
-                        const padYTop = Math.max(0.03, (maxY - minY) * 0.12);
-                        const padYBot = Math.max(0.03, (maxY - minY) * 0.08);
+                        const padX = Math.max(0.018, (maxX - minX) * 0.12);
+                        const padYTop = Math.max(0.025, (maxY - minY) * 0.10);
+                        const padYBot = Math.max(0.025, (maxY - minY) * 0.08);
                         const bx = Math.max(6, (minX - padX) * W);
                         const by = Math.max(6, (minY - padYTop) * H);
                         const bw = Math.min(W - bx - 6, (maxX - minX + padX * 2) * W);
                         const bh = Math.min(H - by - 6, (maxY - minY + padYTop + padYBot) * H);
 
-                        if (bw >= 24 && bh >= 28 && bw < W * 0.72 && bh < H * 0.94) {
+                        if (bw >= 24 && bh >= 28 && bw < W * 0.70 && bh < H * 0.94) {
+                          const shadowCroppedBox = cropCastShadowFromBox(
+                            [bx, by, bw, bh],
+                            data,
+                            gray,
+                            GW,
+                            GH,
+                            W,
+                            H
+                          );
+
                           let torsoAngleDeg = 10.0;
                           let foreshortenedFloor = false;
                           const lSh = lm[11];
@@ -964,18 +1312,18 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                             torsoAngleDeg =
                               Math.round(((Math.atan2(dx, dy) * 180) / Math.PI) * 10) / 10;
                             const torsoNormDy = Math.abs(shMidY - hipMidY);
-                            if (shMidY > 0.48 || (torsoNormDy < 0.14 && minY > 0.42)) {
+                            if (torsoNormDy < 0.11 && minY > 0.48) {
                               foreshortenedFloor = true;
                             }
                           }
 
                           rawCandidates.push({
-                            bbox: [bx, by, bw, bh],
+                            bbox: shadowCroppedBox,
                             keypointsMap: kpsMap,
                             torsoAngleDeg,
                             foreshortenedFloor,
                             fromPose: true,
-                            score: 0.95,
+                            score: 0.96,
                           });
                         }
                       }
@@ -996,15 +1344,27 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                     objResult.detections.forEach((det) => {
                       const bb = det.boundingBox;
                       const score = det.categories?.[0]?.score ?? 0.35;
-                      if (!bb || score < 0.3) return;
+                      if (!bb || score < 0.32) return;
                       const bx = Math.max(6, bb.originX * scaleVidX);
                       const by = Math.max(6, bb.originY * scaleVidY);
                       const bw = Math.min(W - bx - 6, bb.width * scaleVidX);
                       const bh = Math.min(H - by - 6, bb.height * scaleVidY);
 
-                      if (bw >= 20 && bh >= 24 && bw < W * 0.68 && bh < H * 0.93) {
+                      // Reject static upper-horizon monuments/archways (e.g. Place du Méchouar central tower y < 46%)
+                      if (by + bh < H * 0.47 && bx > W * 0.42 && bx + bw < W * 0.58) return;
+
+                      if (bw >= 20 && bh >= 24 && bw < W * 0.65 && bh < H * 0.93) {
+                        const shadowCroppedBox = cropCastShadowFromBox(
+                          [bx, by, bw, bh],
+                          data,
+                          gray,
+                          GW,
+                          GH,
+                          W,
+                          H
+                        );
                         rawCandidates.push({
-                          bbox: [bx, by, bw, bh],
+                          bbox: shadowCroppedBox,
                           fromPose: false,
                           score,
                         });
@@ -1018,59 +1378,31 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             }
 
             // =========================================================================
-            // 3. 60-FRAME PEAK-HEIGHT HYSTERESIS SCENE ROUTER & FLOOR CONTINUITY
+            // 3. FOREGROUND DOMINANCE FILTER & LOCAL SHADOW-CROPPED ROI CONTINUITY
             // =========================================================================
-            const numPixels = GW * GH;
-            const gray = new Uint8Array(numPixels);
-            const motionMask = new Uint8Array(numPixels);
-            const prevGray = prevGrayRef.current;
+            const hyst = scaleHysteresisRef.current;
 
-            if (!bgModelRef.current || bgModelRef.current.length !== numPixels) {
-              bgModelRef.current = new Float32Array(numPixels);
-              for (let i = 0; i < numPixels; i++) {
-                const idx = i * 4;
-                bgModelRef.current[i] =
-                  (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
-              }
-            }
-            const bgModel = bgModelRef.current;
+            // Filter out tiny distant walkers in the background (bh < 9.5% of frame height in upper half)
+            // when a clear foreground person is present or latched
+            const hasForegroundCandidate = rawCandidates.some(
+              (c) => c.bbox[3] >= H * 0.11 || (c.bbox[2] >= W * 0.11 && c.bbox[1] + c.bbox[3] >= H * 0.55)
+            );
+            const filteredRawCandidates =
+              hasForegroundCandidate || hyst.latchedSingleForegroundMode
+                ? rawCandidates.filter(
+                    (c) =>
+                      c.bbox[3] >= H * 0.095 ||
+                      c.bbox[2] >= W * 0.10 ||
+                      c.bbox[1] + c.bbox[3] >= H * 0.58
+                  )
+                : rawCandidates;
 
-            let frameMotionCount = 0;
-            let motionMinX = GW;
-            let motionMaxX = 0;
-            let motionMinY = GH;
-            let motionMaxY = 0;
-
-            for (let y = 8; y < GH - 6; y++) {
-              for (let x = 10; x < GW - 10; x++) {
-                const pIdx = y * GW + x;
-                const idx = pIdx * 4;
-                const luma = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
-                gray[pIdx] = luma;
-
-                const mDiff = prevGray ? Math.abs(luma - prevGray[pIdx]) : 0;
-                if (mDiff >= 16) {
-                  motionMask[pIdx] = 1;
-                  frameMotionCount++;
-                  if (x < motionMinX) motionMinX = x;
-                  if (x > motionMaxX) motionMaxX = x;
-                  if (y < motionMinY) motionMinY = y;
-                  if (y > motionMaxY) motionMaxY = y;
-                } else if (mDiff < 8) {
-                  bgModel[pIdx] = bgModel[pIdx] * 0.992 + luma * 0.008;
-                }
-              }
-            }
-            prevGrayRef.current = gray;
-
-            // Update 60-frame peak height hysteresis buffer
             let currentFrameMaxHeightRatio = 0;
-            rawCandidates.forEach((c) => {
+            filteredRawCandidates.forEach((c) => {
               const r = c.bbox[3] / H;
               if (r > currentFrameMaxHeightRatio) currentFrameMaxHeightRatio = r;
             });
 
-            const hyst = scaleHysteresisRef.current;
             if (currentFrameMaxHeightRatio > 0) {
               hyst.trailingMaxHeights.push(currentFrameMaxHeightRatio);
               if (hyst.trailingMaxHeights.length > 60) {
@@ -1083,95 +1415,95 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 : 0;
             hyst.sessionPeakHeightRatio = Math.max(hyst.sessionPeakHeightRatio, trailingPeak);
 
-            // Latch Close-Up Mode if peak height >= 28% OR if webcam is active OR if<= 2 people with height >= 22%
+            // Latch Single Foreground Subject Mode when 1-2 foreground subjects are present (e.g. Place du Méchouar bh ≈ 0.26 or close-up room)
             if (
               inputSource === 'webcam' ||
-              hyst.sessionPeakHeightRatio >= 0.28 ||
-              trailingPeak >= 0.28 ||
-              (rawCandidates.length === 1 && currentFrameMaxHeightRatio >= 0.22)
+              hyst.sessionPeakHeightRatio >= 0.22 ||
+              trailingPeak >= 0.22 ||
+              (filteredRawCandidates.length >= 1 &&
+                filteredRawCandidates.length <= 2 &&
+                currentFrameMaxHeightRatio >= 0.12)
             ) {
-              hyst.latchedCloseUpMode = true;
+              if (filteredRawCandidates.length <= 3 && tracksRef.current.length <= 3) {
+                hyst.latchedSingleForegroundMode = true;
+              }
+            } else if (filteredRawCandidates.length >= 5) {
+              hyst.latchedSingleForegroundMode = false;
             }
 
-            // Close-Up Floor Silhouette Continuity Fallback:
-            // If PoseLandmarker & ObjectDetector missed a foreshortened person lying flat on the room floor
-            // (as in image_f7dfc550.png), scan the central floor aisle for a human body silhouette!
-            if (rawCandidates.length === 0 && (hyst.latchedCloseUpMode || tracksRef.current.length <= 1)) {
-              // Check central floor corridor (x: 28%..70%, y: 45%..92%) for strong human body contrast (dark pants/hair or teal/colored top vs light floor)
-              let floorBodyPixels = 0;
-              let fbMinX = GW;
-              let fbMaxX = 0;
-              let fbMinY = GH;
-              let fbMaxY = 0;
-
-              const xStart = Math.floor(GW * 0.30);
-              const xEnd = Math.floor(GW * 0.68);
-              const yStart = Math.floor(GH * 0.48);
-              const yEnd = Math.floor(GH * 0.90);
-
-              for (let y = yStart; y <= yEnd; y++) {
-                for (let x = xStart; x <= xEnd; x++) {
-                  const pIdx = y * GW + x;
-                  const idx = pIdx * 4;
-                  const r = data[idx];
-                  const g = data[idx + 1];
-                  const b = data[idx + 2];
-                  const luma = gray[pIdx];
-                  const [h, s] = rgbToOpenCvHsv(r, g, b);
-
-                  // Dark leggings/pants on light linoleum floor OR saturated teal/blue/red shirt on floor
-                  const isDarkLeggingsOnFloor = luma < 62 && x > GW * 0.38 && x < GW * 0.64;
-                  const isTealOrColoredTopOnFloor = s > 95 && luma > 55 && luma < 195 && (h >= 75 && h <= 130);
-
-                  if (isDarkLeggingsOnFloor || isTealOrColoredTopOnFloor) {
-                    floorBodyPixels++;
-                    if (x < fbMinX) fbMinX = x;
-                    if (x > fbMaxX) fbMaxX = x;
-                    if (y < fbMinY) fbMinY = y;
-                    if (y > fbMaxY) fbMaxY = y;
-                  }
-                }
+            // Local Shadow-Cropped Body Continuity Tracker:
+            // When MediaPipe misses a frame (e.g. flowing djellaba or horizontal collapse on Place du Méchouar at 00:04-00:09),
+            // extract the exact shadow-cropped body box inside the local search window around the person!
+            const primaryTrack = tracksRef.current[0] || null;
+            if (
+              filteredRawCandidates.length === 0 &&
+              (hyst.latchedSingleForegroundMode || tracksRef.current.length <= 1) &&
+              !(primaryTrack && primaryTrack.isFallen && primaryTrack.faintLockedBbox)
+            ) {
+              const localBody = extractShadowCroppedBodyInROI(
+                primaryTrack ? primaryTrack.bbox : null,
+                primaryTrack ? primaryTrack.standingBottomY : null,
+                data,
+                gray,
+                GW,
+                GH,
+                W,
+                H
+              );
+              if (localBody) {
+                hyst.latchedSingleForegroundMode = true;
+                filteredRawCandidates.push({
+                  bbox: localBody.bbox,
+                  foreshortenedFloor: localBody.foreshortenedFloor,
+                  fromPose: false,
+                  score: localBody.score,
+                });
               }
-
-              if (floorBodyPixels >= 38) {
-                const bx = Math.max(12, (fbMinX - 3) * scaleX);
-                const by = Math.max(12, (fbMinY - 3) * scaleY);
-                const bw = Math.min(W - bx - 12, Math.max(120, (fbMaxX - fbMinX + 6) * scaleX));
-                const bh = Math.min(H - by - 12, Math.max(130, (fbMaxY - fbMinY + 6) * scaleY));
-
-                hyst.latchedCloseUpMode = true;
-                rawCandidates.push({
-                  bbox: [bx, by, bw, bh],
-                  foreshortenedFloor: true,
-                  fromPose: false,
-                  score: 0.85,
-                });
-              } else if (frameMotionCount >= 28 && hyst.latchedCloseUpMode) {
-                const bx = Math.max(12, motionMinX * scaleX);
-                const by = Math.max(12, motionMinY * scaleY);
-                const bw = Math.min(W * 0.48, Math.max(110, (motionMaxX - motionMinX + 6) * scaleX));
-                const bh = Math.min(H * 0.85, Math.max(130, (motionMaxY - motionMinY + 6) * scaleY));
-                rawCandidates.push({
-                  bbox: [bx, by, bw, bh],
-                  fromPose: false,
-                  score: 0.65,
-                });
+            } else if (
+              filteredRawCandidates.length === 1 &&
+              hyst.latchedSingleForegroundMode &&
+              primaryTrack &&
+              !primaryTrack.isFallen
+            ) {
+              // Also cross-check single detector candidate against shadow-cropped ROI so loose robes/horizontal bodies stay tight
+              const cand = filteredRawCandidates[0];
+              const localBody = extractShadowCroppedBodyInROI(
+                primaryTrack.bbox,
+                primaryTrack.standingBottomY,
+                data,
+                gray,
+                GW,
+                GH,
+                W,
+                H
+              );
+              if (localBody && boxIoU(cand.bbox, localBody.bbox) > 0.20) {
+                cand.bbox = [
+                  cand.bbox[0] * 0.55 + localBody.bbox[0] * 0.45,
+                  cand.bbox[1] * 0.55 + localBody.bbox[1] * 0.45,
+                  cand.bbox[2] * 0.55 + localBody.bbox[2] * 0.45,
+                  cand.bbox[3] * 0.55 + localBody.bbox[3] * 0.45,
+                ];
               }
             }
 
-            const isCloseUpMode = hyst.latchedCloseUpMode;
-            setSceneScaleLabel(isCloseUpMode ? 'Close-Up Mode' : 'Wide Crowd Mode');
+            const isSingleForegroundMode = hyst.latchedSingleForegroundMode;
+            setSceneScaleLabel(
+              isSingleForegroundMode ? 'Foreground Subject Mode' : 'Wide Crowd Mode'
+            );
 
-            // Apply Containment NMS: In Close-Up Mode, guarantees strictly 1 unified box on the person!
-            const nmsCandidates = applyContainmentNMS(rawCandidates, isCloseUpMode);
+            // Containment NMS guarantees strictly 1 clean box on the primary foreground person
+            const nmsCandidates = applyContainmentNMS(
+              filteredRawCandidates,
+              isSingleForegroundMode
+            );
 
             // =========================================================================
-            // 4. UPDATE TRACKS + TWO-STAGE TEMPORAL IMMOBILITY GATE (1.5s) -> INDEFINITE LOCK
+            // 4. SPATIALLY GATED TRACK UPDATE + RELATIVE COLLAPSE (<1.0s FAINT LOCK)
             // =========================================================================
             const tracks = tracksRef.current;
 
-            // If Close-Up Mode is active and multiple old tracks somehow existed, collapse to the primary one
-            if (isCloseUpMode && tracks.length > 1) {
+            if (isSingleForegroundMode && tracks.length > 1) {
               const primary = tracks.find((t) => t.isFallen) || tracks[0];
               tracksRef.current = [primary];
             }
@@ -1186,13 +1518,12 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
 
               activeTracks.forEach((tr) => {
                 if (matchedTrackIds.has(tr.id)) return;
-                if (isCloseUpMode) {
-                  bestTrack = tr;
-                  bestDist = 0;
-                  return;
-                }
                 const d = centerDist(tr.bbox, cand.bbox);
-                if (d < 65 && d < bestDist) {
+
+                // SPATIAL GATE: Even in single-foreground mode, candidate must be within reasonable proximity
+                // of the track (prevents jumping to distant background artifacts)
+                const maxAllowedDist = isSingleForegroundMode ? W * 0.26 : 68;
+                if (d < maxAllowedDist && d < bestDist) {
                   bestDist = d;
                   bestTrack = tr;
                 }
@@ -1210,19 +1541,42 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 const newCx = cand.bbox[0] + cand.bbox[2] * 0.5;
                 const newCy = cand.bbox[1] + cand.bbox[3] * 0.5;
 
-                tr.vx = tr.vx * 0.65 + (newCx - prevCx) * 0.35;
-                tr.vy = tr.vy * 0.65 + (newCy - prevCy) * 0.35;
+                // Clamp per-frame velocity so the box never jerks or plays around
+                const clampedDx = Math.max(-18, Math.min(18, newCx - prevCx));
+                const clampedDy = Math.max(-18, Math.min(18, newCy - prevCy));
+
+                tr.vx = tr.vx * 0.68 + clampedDx * 0.32;
+                tr.vy = tr.vy * 0.68 + clampedDy * 0.32;
                 tr.speedPx = Math.hypot(tr.vx, tr.vy);
 
-                // Smoothly update bounding box unless already committed to Indefinite Faint Lock
                 if (!tr.isFallen || !tr.faintLockedBbox) {
-                  const alpha = cand.fromPose ? 0.38 : 0.28;
+                  const alpha = cand.fromPose ? 0.35 : 0.30;
                   tr.bbox = [
                     tr.bbox[0] * (1 - alpha) + cand.bbox[0] * alpha,
                     tr.bbox[1] * (1 - alpha) + cand.bbox[1] * alpha,
                     tr.bbox[2] * (1 - alpha) + cand.bbox[2] * alpha,
                     tr.bbox[3] * (1 - alpha) + cand.bbox[3] * alpha,
                   ];
+                } else if (
+                  tr.isFallen &&
+                  tr.faintLockedBbox &&
+                  tr.faintStartTime &&
+                  now - tr.faintStartTime < 900
+                ) {
+                  // During the first 0.9s after faint lock triggers (e.g. transitioning from kneeling at 00:04 to lying flat at 00:05),
+                  // allow the locked box to settle onto the flatter horizontal posture, then freeze 100% indefinitely!
+                  const currLockedAspect =
+                    tr.faintLockedBbox[2] / Math.max(1, tr.faintLockedBbox[3]);
+                  const candAspect = cand.bbox[2] / Math.max(1, cand.bbox[3]);
+                  if (candAspect > currLockedAspect * 1.04) {
+                    tr.faintLockedBbox = [
+                      tr.faintLockedBbox[0] * 0.5 + cand.bbox[0] * 0.5,
+                      tr.faintLockedBbox[1] * 0.5 + cand.bbox[1] * 0.5,
+                      tr.faintLockedBbox[2] * 0.5 + cand.bbox[2] * 0.5,
+                      tr.faintLockedBbox[3] * 0.5 + cand.bbox[3] * 0.5,
+                    ];
+                    tr.bbox = [...tr.faintLockedBbox];
+                  }
                 }
 
                 const [bx, by, bw, bh] = tr.bbox;
@@ -1245,26 +1599,26 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                   });
                 }
 
-                // Check if person is clearly standing upright in upper-to-mid frame
-                const isClearlyStanding =
-                  isCloseUpMode
-                    ? by < H * 0.35 && bh > H * 0.46 && aspect < 0.82 && !cand.foreshortenedFloor
-                    : aspect < 0.85 && !cand.foreshortenedFloor;
+                // RELATIVE UPRIGHT STANDING CHECK (Works at any Y depth on an outdoor plaza or indoor room!)
+                const isRelativelyStanding =
+                  aspect < 0.80 &&
+                  (tr.peakHeight === 0 || bh >= tr.peakHeight * 0.74) &&
+                  !cand.foreshortenedFloor;
 
-                if (isClearlyStanding) {
+                if (isRelativelyStanding) {
                   tr.standingFrames++;
-                  if (bh > tr.peakHeight * 0.85) {
+                  if (bh >= tr.peakHeight * 0.85) {
                     tr.peakHeight = Math.max(tr.peakHeight, bh);
                     tr.baselineTopY = Math.min(tr.baselineTopY, by);
+                    tr.standingBottomY = Math.max(tr.standingBottomY, by + bh);
                     tr.standingBaselineBbox = [...tr.bbox];
                   }
-                  // If they stood back up during the 1.5s verification window, cancel the fall candidate!
                   if (tr.standingFrames >= 4 && !tr.isFallen) {
                     tr.collapseCandidateStartMs = null;
                     tr.isVerifyingFall = false;
                     tr.verifyProgressSec = 0;
                   }
-                  // Unlock Indefinite Faint Lock ONLY if the person clearly stands back up for 15+ consecutive frames!
+                  // Unlock Indefinite Faint Lock ONLY if person clearly stands back up for 15+ consecutive upright frames
                   if (tr.isFallen && tr.standingFrames >= 15 && !manualFallOverride) {
                     tr.isFallen = false;
                     tr.faintLockedBbox = null;
@@ -1276,23 +1630,35 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                   tr.standingFrames = 0;
                 }
 
-                // Evaluate 4-Way Collapse / Floor Posture Rules
-                if (isCloseUpMode) {
-                  const headDropPct =
-                    tr.baselineTopY < H ? Math.round(((by - tr.baselineTopY) / H) * 100) : 0;
+                // =====================================================================
+                // RELATIVE POSTURE COLLAPSE GEOMETRY & SUB-1-SECOND (<1.0s) FAINT LOCK
+                // =====================================================================
+                if (isSingleForegroundMode) {
+                  const headDropRatio =
+                    tr.peakHeight > 0 ? (by - tr.baselineTopY) / tr.peakHeight : 0;
                   const heightCompPct =
                     tr.peakHeight > 0 ? Math.round((1 - bh / tr.peakHeight) * 100) : 0;
 
-                  const sigHeadDropped =
-                    tr.peakHeight > H * 0.38 && headDropPct >= 18 && by > H * 0.42;
-                  const sigHeightComp =
-                    tr.peakHeight > H * 0.38 && heightCompPct >= 28 && by > H * 0.42;
-                  const sigFloorZone =
-                    (by > H * 0.46 && by + bh * 0.5 > H * 0.62) || Boolean(cand.foreshortenedFloor);
-                  const sigAngle = aspect > 1.12 || (cand.torsoAngleDeg ?? 0) > 46;
+                  // 1. Horizontal Aspect Ratio Flip (standing ~0.42 -> kneeling/lying >= 1.08)
+                  const sigHorizontalFlip = aspect >= 1.08;
+                  // 2. Relative Height Compression + Head Drop toward ground plane
+                  const sigRelativeCompression =
+                    tr.peakHeight >= H * 0.14 &&
+                    heightCompPct >= 32 &&
+                    headDropRatio >= 0.28;
+                  // 3. Severe Torso Tilt
+                  const sigTorsoTilt = (cand.torsoAngleDeg ?? 0) >= 48 && aspect >= 0.88;
+                  // 4. Indoor Foreshortened Floor Posture (for videos starting already on floor)
+                  const sigIndoorForeshortened =
+                    Boolean(cand.foreshortenedFloor) &&
+                    tr.peakHeight === 0 &&
+                    by > H * 0.48;
 
                   const inCollapsedPosture =
-                    sigHeadDropped || sigHeightComp || sigFloorZone || sigAngle;
+                    sigHorizontalFlip ||
+                    sigRelativeCompression ||
+                    sigTorsoTilt ||
+                    sigIndoorForeshortened;
 
                   if (inCollapsedPosture && !tr.isFallen) {
                     if (!tr.collapseCandidateStartMs) {
@@ -1301,21 +1667,21 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                     const elapsedSec = (now - tr.collapseCandidateStartMs) / 1000;
                     tr.verifyProgressSec = Math.round(elapsedSec * 10) / 10;
 
-                    // Require 1.5s of continuous floor-zone presence + low motion (or 0.6s if already motionless on the floor at video start)
-                    const requiredPersistenceSec = tr.peakHeight === 0 && sigFloorZone ? 0.6 : 1.5;
+                    // Sub-1-second confirmation (0.65s) as requested by user!
+                    const requiredPersistenceSec = 0.65;
 
                     if (elapsedSec < requiredPersistenceSec) {
                       tr.isVerifyingFall = true;
-                    } else if (tr.speedPx < 6.5 || sigFloorZone) {
+                    } else {
                       // COMMIT TO INDEFINITE IMMUTABLE FAINT LOCK!
                       tr.isFallen = true;
                       tr.isVerifyingFall = false;
                       tr.faintLockedBbox = [...tr.bbox];
                       tr.faintStartTime = now;
-                      tr.faintReason = sigHeadDropped
-                        ? `Head dropped ${headDropPct}% & motionless on floor`
-                        : 'Collapsed & motionless on floor (Locked Indefinitely)';
-                      tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.bbox);
+                      tr.faintReason = sigHorizontalFlip
+                        ? `Horizontal Collapse Detected (Aspect ${aspect.toFixed(1)}x · Locked Indefinitely)`
+                        : `Height Compressed ${heightCompPct}% & Collapsed on Ground (Locked Indefinitely)`;
+                      tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.faintLockedBbox);
                     }
                   }
                 }
@@ -1326,15 +1692,17 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 } else {
                   const psoList = Object.values(tr.psoKeypointsMap);
                   tr.smoothedKeypoints =
-                    psoList.length >= 5
+                    psoList.length >= 8 && aspect < 0.85
                       ? psoList
+                      : aspect >= 1.05
+                      ? buildFrozenFloorKeypoints(tr.bbox)
                       : buildStandingKeypoints(tr.bbox, now * 0.008 + tr.id);
                 }
               }
             });
 
-            // Nudge unmatched crowd tracks smoothly with local optical flow
-            if (!isCloseUpMode) {
+            // Smooth optical-flow interpolation for multi-person crowd tracks
+            if (!isSingleForegroundMode) {
               activeTracks.forEach((tr) => {
                 if (matchedTrackIds.has(tr.id) || tr.isFallen) return;
                 const [bx, by, bw, bh] = tr.bbox;
@@ -1372,28 +1740,29 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             // Create new track(s) for unmatched candidates
             nmsCandidates.forEach((cand, cIdx) => {
               if (matchedCandIndices.has(cIdx)) return;
-              if (isCloseUpMode && activeTracks.length >= 1) return;
+              if (isSingleForegroundMode && activeTracks.length >= 1) return;
               if (activeTracks.length >= 28) return;
 
               const id = nextTrackIdRef.current++;
               const [bx, by, bw, bh] = cand.bbox;
               const aspect = bw / Math.max(1, bh);
-              const isImmediateFloor = Boolean(cand.foreshortenedFloor) && by > H * 0.45;
+              const isImmediateHorizontal = aspect >= 1.15;
 
               activeTracks.push({
                 id,
                 bbox: [...cand.bbox],
-                standingBaselineBbox: !isImmediateFloor && aspect < 0.88 ? [...cand.bbox] : null,
-                peakHeight: !isImmediateFloor && aspect < 0.88 ? bh : 0,
-                baselineTopY: !isImmediateFloor && aspect < 0.88 ? by : H,
+                standingBaselineBbox: !isImmediateHorizontal ? [...cand.bbox] : null,
+                peakHeight: !isImmediateHorizontal ? bh : 0,
+                baselineTopY: !isImmediateHorizontal ? by : H,
+                standingBottomY: by + bh,
                 vx: 0,
                 vy: 0,
                 speedPx: 0,
                 ageFrames: 3,
                 missedFrames: 0,
-                standingFrames: isImmediateFloor ? 0 : 1,
-                collapseCandidateStartMs: isImmediateFloor ? now : null,
-                isVerifyingFall: isImmediateFloor,
+                standingFrames: isImmediateHorizontal ? 0 : 2,
+                collapseCandidateStartMs: isImmediateHorizontal ? now : null,
+                isVerifyingFall: isImmediateHorizontal,
                 verifyProgressSec: 0,
                 isFallen: false,
                 faintLockedBbox: null,
@@ -1401,43 +1770,37 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 faintReason: '',
                 neuralFaintConfirmed: false,
                 neuralVerified: cand.fromPose || cand.score >= 0.45,
-                smoothedKeypoints: cand.keypointsMap
-                  ? Object.values(cand.keypointsMap)
+                smoothedKeypoints: isImmediateHorizontal
+                  ? buildFrozenFloorKeypoints(cand.bbox)
                   : buildStandingKeypoints(cand.bbox, id),
                 psoKeypointsMap: cand.keypointsMap || {},
-                torsoColor: 'BLUE',
+                torsoColor: 'WHITE',
                 hsvMatchPct: 0,
               });
             });
 
             // INDEFINITE FAINT LOCK RETENTION:
-            // Tracks that are faint-locked (`tr.isFallen`) NEVER expire!
-            // And in Close-Up Mode, if a standing person drops onto the floor and detector loses them, lock their floor position!
+            // Never prematurely teleport a walking person's box when missedFrames >= 2;
+            // instead, keep their smooth position or lock only if they were already actively collapsing!
             tracksRef.current = activeTracks.filter((tr) => {
               if (!matchedTrackIds.has(tr.id)) {
                 tr.missedFrames++;
                 if (
-                  isCloseUpMode &&
+                  isSingleForegroundMode &&
                   !tr.isFallen &&
-                  tr.missedFrames >= 2 &&
-                  (tr.vy > 2.5 || tr.bbox[1] > H * 0.36 || tr.isVerifyingFall)
+                  tr.isVerifyingFall &&
+                  tr.missedFrames >= 3
                 ) {
-                  const [lx, ly, lw, lh] = tr.bbox;
-                  const floorY = Math.max(ly, H * 0.50);
-                  const floorH = Math.min(H - floorY - 10, Math.max(145, lh * 0.60));
-                  const locked: [number, number, number, number] = [lx, floorY, lw, floorH];
                   tr.isFallen = true;
                   tr.isVerifyingFall = false;
-                  tr.faintLockedBbox = locked;
-                  tr.bbox = [...locked];
+                  tr.faintLockedBbox = [...tr.bbox];
                   tr.faintStartTime = tr.faintStartTime || now;
-                  tr.faintReason = 'Remembered Floor Collapse Position (Locked Indefinitely)';
-                  tr.smoothedKeypoints = buildFrozenFloorKeypoints(locked);
+                  tr.faintReason = 'Collapsed on Ground (Locked Indefinitely)';
+                  tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.faintLockedBbox);
                 }
               }
 
-              // Indefinite retention for fainted person or primary close-up person!
-              if (tr.isFallen || isCloseUpMode) {
+              if (tr.isFallen || isSingleForegroundMode) {
                 return true;
               }
               if (tr.neuralVerified) {
@@ -1501,12 +1864,12 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               if (tr.isFallen) {
                 activeFaintSummary = `${tr.faintReason || 'Floor Faint Locked Indefinitely'} (${faintDurationSec}s)`;
               } else if (tr.isVerifyingFall) {
-                activeVerifySummary = `Verifying Floor Immobility (${tr.verifyProgressSec.toFixed(1)}s / 1.5s)...`;
+                activeVerifySummary = `Confirming Fall (${tr.verifyProgressSec.toFixed(1)}s / 0.7s)...`;
               }
 
               detectedSubjects.push({
                 id: tr.id,
-                label: isCloseUpMode ? 'Person #1' : `Student #${idx + 1}`,
+                label: isSingleForegroundMode ? 'Person #1' : `Person #${idx + 1}`,
                 bbox: activeBox,
                 lastStandingBbox: tr.standingBaselineBbox || undefined,
                 headRoi: [bx + bw * 0.24, by + bh * 0.04, bw * 0.52, bh * 0.22],
@@ -1514,9 +1877,9 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 keypoints: tr.smoothedKeypoints,
                 torsoColor: tr.hsvMatchPct >= 24 ? targetColor : tr.torsoColor,
                 hsvMatchPct: tr.hsvMatchPct,
-                torsoAngleDeg: tr.isFallen ? 78.0 : 12.0,
-                headDropPct: tr.isFallen ? 42 : 0,
-                heightCompressionPct: tr.isFallen ? 45 : 0,
+                torsoAngleDeg: tr.isFallen ? 82.0 : 10.0,
+                headDropPct: tr.isFallen ? 48 : 0,
+                heightCompressionPct: tr.isFallen ? 54 : 0,
                 aspectRatio: Math.round((bw / Math.max(1, bh)) * 100) / 100,
                 isVerifyingFall: tr.isVerifyingFall,
                 verifyProgressSec: tr.verifyProgressSec,
@@ -1653,7 +2016,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
           let frameAlertActive = false;
           let frameGreenWave = false;
           let frameAlertTitle = `All Clear — Tracking ${detectedSubjects.length} ${
-            detectedSubjects.length === 1 ? 'Person' : 'Students / People'
+            detectedSubjects.length === 1 ? 'Person' : 'People'
           }`;
           let frameAlertDetail = `Monitoring ${activeCamera.name} (${sceneScaleLabel}). Hospital → Place du Méchouar route on standby.`;
 
@@ -1718,7 +2081,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 : subj.isVerifyingFall
                 ? 'rgba(245, 158, 11, 0.9)'
                 : 'rgba(6, 182, 212, 0.85)';
-              ctx.lineWidth = isSmallBox ? 1.5 : 2.4;
+              ctx.lineWidth = isSmallBox ? 1.6 : 2.4;
 
               bonePairs.forEach(([a, b]) => {
                 if (kpByName[a] && kpByName[b]) {
@@ -1729,7 +2092,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 }
               });
 
-              const dotRadius = isSmallBox ? 2.0 : 3.5;
+              const dotRadius = isSmallBox ? 2.2 : 3.5;
               subj.keypoints.forEach((pt) => {
                 ctx.fillStyle = subj.isFallen
                   ? '#EF4444'
@@ -1744,7 +2107,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             }
 
             let boxColor = '#10B981';
-            let statusText = isCompactCrowd ? subj.label : `${subj.label} · Standing / Normal`;
+            let statusText = isCompactCrowd ? subj.label : `${subj.label} · Standing / Walking`;
 
             if (mode === 'najda') {
               if (subj.isFallen) {
@@ -1756,7 +2119,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 frameAlertActive = true;
                 frameGreenWave = true;
                 frameAlertTitle = `Emergency at Place du Méchouar — ${subj.label} Fainted!`;
-                frameAlertDetail = `${subj.label} collapsed & remained motionless on floor. Hospital → Place du Méchouar 5-turn route is now a GREEN ZONE.`;
+                frameAlertDetail = `${subj.label} collapsed horizontally onto the ground. Hospital → Place du Méchouar 5-turn route is now a GREEN ZONE.`;
 
                 if (now - lastAlertTimeRef.current > 7000) {
                   lastAlertTimeRef.current = now;
@@ -1764,16 +2127,16 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 }
               } else if (subj.isVerifyingFall) {
                 boxColor = '#F59E0B';
-                statusText = `Analyzing Potential Fall... (${(subj.verifyProgressSec ?? 0).toFixed(1)}s / 1.5s)`;
-                frameAlertTitle = `Verifying Floor Immobility — ${subj.label}`;
-                frameAlertDetail = `Checking 1.5s temporal persistence to distinguish a true faint from bending/sitting...`;
+                statusText = `Fall Detected · Locking (${(subj.verifyProgressSec ?? 0).toFixed(1)}s)...`;
+                frameAlertTitle = `Confirming Fall at Place du Méchouar — ${subj.label}`;
+                frameAlertDetail = `Subject collapsed toward the ground. Locking faint position & preparing Green-Wave dispatch...`;
               }
             } else if (mode === 'tifawt') {
               if (subj.hsvMatchPct >= 25) {
                 boxColor = '#F59E0B';
                 statusText = `${subj.label}: ${TARGET_COLOR_CONFIG[targetColor].label} (${subj.hsvMatchPct}%)`;
                 frameAlertActive = true;
-                frameAlertTitle = `Person Found — ${TARGET_COLOR_CONFIG[targetColor].label} Shirt (${subj.hsvMatchPct}%)`;
+                frameAlertTitle = `Person Found — ${TARGET_COLOR_CONFIG[targetColor].label} Clothing (${subj.hsvMatchPct}%)`;
                 frameAlertDetail = `Located ${subj.label} wearing ${TARGET_COLOR_CONFIG[targetColor].label} at ${activeCamera.name}.`;
 
                 ctx.save();
@@ -1845,10 +2208,10 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             );
           });
 
-          // Top-Left Camera & Hysteresis Scale Mode Badge
+          // Top-Left Camera & Tracking Badge
           ctx.fillStyle = 'rgba(11, 15, 23, 0.84)';
           ctx.beginPath();
-          ctx.roundRect(14, 14, 480, 36, 6);
+          ctx.roundRect(14, 14, 495, 36, 6);
           ctx.fill();
           ctx.fillStyle = '#F8FAFC';
           ctx.font = '600 12px "Plus Jakarta Sans", sans-serif';
@@ -1974,7 +2337,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
       {mode === 'tifawt' && (
         <div className="px-4 py-3 bg-[#0B0F17] border-b border-[#1E293B] flex flex-wrap items-center justify-between gap-3">
           <span className="text-xs font-medium text-white">
-            Pick the shirt color you want the camera to find:
+            Pick the clothing color you want the camera to find:
           </span>
           <div className="flex flex-wrap items-center gap-2">
             {(['RED', 'BLUE', 'YELLOW', 'GREEN', 'BLACK', 'WHITE'] as TargetClothingColor[]).map(
@@ -2049,7 +2412,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         </div>
       )}
 
-      {/* Bottom Bar: Dual-Scale Hysteresis & Indefinite Faint-Lock Status */}
+      {/* Bottom Bar: Shadow-Cropped Foreground Tracker & Faint-Lock Status */}
       <div className="p-4 bg-[#0B0F17] border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
           <span className="flex items-center gap-1.5 text-[#CBD5E1]">
@@ -2060,7 +2423,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             ) : (
               <Sparkles className="w-4 h-4 text-[#10B981]" />
             )}
-            <strong>{sceneScaleLabel} (60-Frame Hysteresis):</strong>{' '}
+            <strong>{sceneScaleLabel}:</strong>{' '}
             {lockedFaintSummary ? (
               <span className="text-[#EF4444] font-semibold">
                 {lockedFaintSummary}
@@ -2071,7 +2434,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               </span>
             ) : (
               <span className="text-[#10B981]">
-                Containment NMS + 1.5s Immobility Gate + Indefinite Floor Lock Active
+                Shadow-Cropped Body Box · Relative Posture Gate (&lt;1s Lock) Active
               </span>
             )}
           </span>
