@@ -13,9 +13,10 @@ import {
   AlertTriangle,
   Crosshair,
   Video,
-  History,
   Lock,
-  Users,
+  Cpu,
+  Sparkles,
+  Clock,
 } from 'lucide-react';
 import {
   OperationalMode,
@@ -60,7 +61,13 @@ interface SimActor {
   hasKnife: boolean;
 }
 
-interface MultiPersonTrack {
+interface ScaleHysteresisState {
+  trailingMaxHeights: number[]; // Rolling 60-frame window of max subject height ratio (bh / H)
+  sessionPeakHeightRatio: number;
+  latchedCloseUpMode: boolean;  // Once Close-Up Mode is detected (>= 0.28), latches true so mid-fall height drop never flips to Crowd Mode
+}
+
+interface TrackedPersonState {
   id: number;
   bbox: [number, number, number, number];
   standingBaselineBbox: [number, number, number, number] | null;
@@ -71,16 +78,21 @@ interface MultiPersonTrack {
   speedPx: number;
   ageFrames: number;
   missedFrames: number;
-  faintFrames: number;
   standingFrames: number;
+  // Two-Stage Temporal Immobility Gate (1.5-2.0s) -> Indefinite Faint Lock
+  collapseCandidateStartMs: number | null;
+  isVerifyingFall: boolean;
+  verifyProgressSec: number;
   isFallen: boolean;
   faintLockedBbox: [number, number, number, number] | null;
   faintStartTime: number | null;
   faintReason: string;
+  neuralFaintConfirmed: boolean;
+  neuralVerified: boolean;
   smoothedKeypoints: PoseKeypoint[];
+  psoKeypointsMap: Record<string, PoseKeypoint>;
   torsoColor: TargetClothingColor;
   hsvMatchPct: number;
-  isPrimaryCloseUp: boolean;
 }
 
 // Proportional Standing Skeleton strictly fitted inside [bx, by, bw, bh]
@@ -89,7 +101,7 @@ function buildStandingKeypoints(
   stridePhase = 0
 ): PoseKeypoint[] {
   const [bx, by, bw, bh] = bbox;
-  const swing = Math.sin(stridePhase) * 0.06;
+  const swing = Math.sin(stridePhase) * 0.04;
   return [
     { name: 'nose', x: bx + bw * 0.5, y: by + bh * 0.12, confidence: 0.95 },
     { name: 'l_shoulder', x: bx + bw * 0.32, y: by + bh * 0.25, confidence: 0.95 },
@@ -102,18 +114,17 @@ function buildStandingKeypoints(
     { name: 'r_hip', x: bx + bw * 0.63, y: by + bh * 0.55, confidence: 0.95 },
     { name: 'l_knee', x: bx + bw * (0.35 + swing), y: by + bh * 0.75, confidence: 0.92 },
     { name: 'r_knee', x: bx + bw * (0.65 - swing), y: by + bh * 0.75, confidence: 0.92 },
-    { name: 'l_ankle', x: bx + bw * (0.33 + swing * 1.2), y: by + bh * 0.93, confidence: 0.9 },
-    { name: 'r_ankle', x: bx + bw * (0.67 - swing * 1.2), y: by + bh * 0.93, confidence: 0.9 },
+    { name: 'l_ankle', x: bx + bw * (0.33 + swing * 1.1), y: by + bh * 0.93, confidence: 0.9 },
+    { name: 'r_ankle', x: bx + bw * (0.67 - swing * 1.1), y: by + bh * 0.93, confidence: 0.9 },
   ];
 }
 
 // Proportional Frozen Floor Faint Skeleton strictly fitted inside [bx, by, bw, bh]
 function buildFrozenFloorKeypoints(bbox: [number, number, number, number]): PoseKeypoint[] {
   const [bx, by, bw, bh] = bbox;
-  const isHorizontal = bw >= bh * 0.95;
+  const isHorizontal = bw >= bh * 1.05;
 
   if (isHorizontal) {
-    // Sprawled horizontal / side collapse on gym or street floor
     return [
       { name: 'nose', x: bx + bw * 0.18, y: by + bh * 0.36, confidence: 0.98 },
       { name: 'l_shoulder', x: bx + bw * 0.30, y: by + bh * 0.28, confidence: 0.98 },
@@ -131,21 +142,21 @@ function buildFrozenFloorKeypoints(bbox: [number, number, number, number]): Pose
     ];
   }
 
-  // Foreshortened floor faint pose (head near top of floor box, feet near bottom)
+  // Foreshortened floor faint pose (head near top of floor box, feet near bottom of floor box, zero jitter)
   return [
-    { name: 'nose', x: bx + bw * 0.48, y: by + bh * 0.12, confidence: 0.98 },
-    { name: 'l_shoulder', x: bx + bw * 0.34, y: by + bh * 0.22, confidence: 0.98 },
-    { name: 'r_shoulder', x: bx + bw * 0.64, y: by + bh * 0.22, confidence: 0.98 },
-    { name: 'l_elbow', x: bx + bw * 0.22, y: by + bh * 0.36, confidence: 0.95 },
-    { name: 'r_elbow', x: bx + bw * 0.74, y: by + bh * 0.36, confidence: 0.95 },
-    { name: 'l_wrist', x: bx + bw * 0.14, y: by + bh * 0.48, confidence: 0.92 },
-    { name: 'r_wrist', x: bx + bw * 0.78, y: by + bh * 0.48, confidence: 0.92 },
-    { name: 'l_hip', x: bx + bw * 0.36, y: by + bh * 0.46, confidence: 0.98 },
-    { name: 'r_hip', x: bx + bw * 0.62, y: by + bh * 0.46, confidence: 0.98 },
-    { name: 'l_knee', x: bx + bw * 0.33, y: by + bh * 0.68, confidence: 0.96 },
+    { name: 'nose', x: bx + bw * 0.48, y: by + bh * 0.10, confidence: 0.98 },
+    { name: 'l_shoulder', x: bx + bw * 0.35, y: by + bh * 0.20, confidence: 0.98 },
+    { name: 'r_shoulder', x: bx + bw * 0.63, y: by + bh * 0.20, confidence: 0.98 },
+    { name: 'l_elbow', x: bx + bw * 0.20, y: by + bh * 0.32, confidence: 0.95 },
+    { name: 'r_elbow', x: bx + bw * 0.78, y: by + bh * 0.32, confidence: 0.95 },
+    { name: 'l_wrist', x: bx + bw * 0.10, y: by + bh * 0.42, confidence: 0.92 },
+    { name: 'r_wrist', x: bx + bw * 0.88, y: by + bh * 0.42, confidence: 0.92 },
+    { name: 'l_hip', x: bx + bw * 0.37, y: by + bh * 0.44, confidence: 0.98 },
+    { name: 'r_hip', x: bx + bw * 0.61, y: by + bh * 0.44, confidence: 0.98 },
+    { name: 'l_knee', x: bx + bw * 0.34, y: by + bh * 0.68, confidence: 0.96 },
     { name: 'r_knee', x: bx + bw * 0.64, y: by + bh * 0.68, confidence: 0.96 },
-    { name: 'l_ankle', x: bx + bw * 0.30, y: by + bh * 0.88, confidence: 0.95 },
-    { name: 'r_ankle', x: bx + bw * 0.68, y: by + bh * 0.88, confidence: 0.95 },
+    { name: 'l_ankle', x: bx + bw * 0.31, y: by + bh * 0.90, confidence: 0.95 },
+    { name: 'r_ankle', x: bx + bw * 0.67, y: by + bh * 0.90, confidence: 0.95 },
   ];
 }
 
@@ -210,12 +221,58 @@ function boxIoU(a: [number, number, number, number], b: [number, number, number,
   return interArea / Math.max(1, areaA + areaB - interArea);
 }
 
+// Measures how much of box B is contained inside box A (prevents sub-boxes on limbs/torso!)
+function boxContainmentRatio(
+  outer: [number, number, number, number],
+  inner: [number, number, number, number]
+): number {
+  const xA = Math.max(outer[0], inner[0]);
+  const yA = Math.max(outer[1], inner[1]);
+  const xB = Math.min(outer[0] + outer[2], inner[0] + inner[2]);
+  const yB = Math.min(outer[1] + outer[3], inner[1] + inner[3]);
+  const interW = Math.max(0, xB - xA);
+  const interH = Math.max(0, yB - yA);
+  const interArea = interW * interH;
+  if (interArea <= 0) return 0;
+  return interArea / Math.max(1, inner[2] * inner[3]);
+}
+
 function centerDist(a: [number, number, number, number], b: [number, number, number, number]): number {
   const ax = a[0] + a[2] * 0.5;
   const ay = a[1] + a[3] * 0.5;
   const bx = b[0] + b[2] * 0.5;
   const by = b[1] + b[3] * 0.5;
   return Math.hypot(ax - bx, ay - by);
+}
+
+// Containment Non-Maximum Suppression: Suppresses any nested or overlapping sub-boxes
+function applyContainmentNMS<T extends { bbox: [number, number, number, number]; score: number }>(
+  items: T[],
+  isCloseUpMode: boolean
+): T[] {
+  if (items.length <= 1) return items;
+  const sorted = [...items].sort(
+    (a, b) => b.bbox[2] * b.bbox[3] * (0.5 + b.score) - a.bbox[2] * a.bbox[3] * (0.5 + a.score)
+  );
+
+  if (isCloseUpMode) {
+    // In Close-Up Mode, merge/keep only the primary human subject (eliminates 12-box limb fragmentation!)
+    return [sorted[0]];
+  }
+
+  const kept: T[] = [];
+  for (const cand of sorted) {
+    const isSuppressed = kept.some(
+      (k) =>
+        boxIoU(k.bbox, cand.bbox) > 0.25 ||
+        boxContainmentRatio(k.bbox, cand.bbox) > 0.45 ||
+        centerDist(k.bbox, cand.bbox) < 24
+    );
+    if (!isSuppressed) {
+      kept.push(cand);
+    }
+  }
+  return kept;
 }
 
 export const VisionCanvas: React.FC<VisionCanvasProps> = ({
@@ -230,6 +287,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const snapshotCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -240,11 +298,24 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
   const bgModelRef = useRef<Float32Array | null>(null);
   const lastAlertTimeRef = useRef<number>(0);
 
-  // Multi-Person Tracker State (Supports 1 to 30+ simultaneous students/pedestrians)
-  const tracksRef = useRef<MultiPersonTrack[]>([]);
+  // 60-Frame Peak-Height Hysteresis Router State
+  const scaleHysteresisRef = useRef<ScaleHysteresisState>({
+    trailingMaxHeights: [],
+    sessionPeakHeightRatio: 0,
+    latchedCloseUpMode: false,
+  });
+
+  // Server-side Pre-Trained Neural Teacher state with Snapshot Drift Tracking
+  const neuralBusyRef = useRef<boolean>(false);
+  const lastNeuralTimeRef = useRef<number>(0);
+  const hasNeuralCalibrationRef = useRef<boolean>(false);
+  const snapshotTrackPositionsRef = useRef<Record<number, [number, number]>>({});
+
+  const tracksRef = useRef<TrackedPersonState[]>([]);
   const nextTrackIdRef = useRef<number>(1);
 
   const [poseModelStatus, setPoseModelStatus] = useState<'loading' | 'ready' | 'fallback'>('loading');
+  const [sceneScaleLabel, setSceneScaleLabel] = useState<'Close-Up Mode' | 'Wide Crowd Mode'>('Close-Up Mode');
   const [webcamError, setWebcamError] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
@@ -254,6 +325,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
   const [manualFallOverride, setManualFallOverride] = useState<boolean>(false);
   const [manualSecurityOverride, setManualSecurityOverride] = useState<boolean>(false);
   const [lockedFaintSummary, setLockedFaintSummary] = useState<string | null>(null);
+  const [verifyingFallSummary, setVerifyingFallSummary] = useState<string | null>(null);
 
   const simActorsRef = useRef<SimActor[]>([
     {
@@ -294,10 +366,10 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     },
   ]);
 
-  // Initialize BOTH Multi-Pose Landmarker AND Multi-Person ObjectDetector
+  // Initialize Pre-Trained Neural Models: PoseLandmarker + EfficientDet-Lite0 ObjectDetector
   useEffect(() => {
     let cancelled = false;
-    async function initVisionModels() {
+    async function initPreTrainedModels() {
       try {
         const vision = await FilesetResolver.forVisionTasks(
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
@@ -311,10 +383,10 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               delegate: 'GPU',
             },
             runningMode: 'VIDEO',
-            numPoses: 5,
-            minPoseDetectionConfidence: 0.3,
-            minPosePresenceConfidence: 0.3,
-            minTrackingConfidence: 0.3,
+            numPoses: 4,
+            minPoseDetectionConfidence: 0.35,
+            minPosePresenceConfidence: 0.35,
+            minTrackingConfidence: 0.35,
           }).catch(() => null),
           ObjectDetector.createFromOptions(vision, {
             baseOptions: {
@@ -323,7 +395,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               delegate: 'GPU',
             },
             runningMode: 'VIDEO',
-            scoreThreshold: 0.22,
+            scoreThreshold: 0.3,
             maxResults: 25,
             categoryAllowlist: ['person'],
           }).catch(() => null),
@@ -340,7 +412,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         }
       }
     }
-    initVisionModels();
+    initPreTrainedModels();
     return () => {
       cancelled = true;
     };
@@ -351,15 +423,199 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     nextTrackIdRef.current = 1;
     prevGrayRef.current = null;
     bgModelRef.current = null;
+    lastNeuralTimeRef.current = 0;
+    hasNeuralCalibrationRef.current = false;
+    snapshotTrackPositionsRef.current = {};
+    scaleHysteresisRef.current = {
+      trailingMaxHeights: [],
+      sessionPeakHeightRatio: 0,
+      latchedCloseUpMode: false,
+    };
     setManualFallOverride(false);
     setManualSecurityOverride(false);
     setLockedFaintSummary(null);
+    setVerifyingFallSummary(null);
     simActorsRef.current.forEach((a) => {
       a.fallen = false;
       a.maskedIntruder = false;
       a.hasKnife = false;
     });
   }, []);
+
+  // Reconcile Server-Side Neural Detections (/api/analyze-frame) with IoU > 0.35 Gating & Optical-Flow Drift Compensation
+  const reconcileServerNeuralDetections = useCallback(
+    (
+      people: Array<{ box_2d: number[]; status: string }>,
+      W: number,
+      H: number,
+      now: number
+    ) => {
+      if (!Array.isArray(people) || people.length === 0) return;
+
+      const rawBoxes: Array<{
+        bbox: [number, number, number, number];
+        status: string;
+        score: number;
+      }> = [];
+
+      let maxReturnedHeightRatio = 0;
+
+      people.forEach((person) => {
+        if (!Array.isArray(person.box_2d) || person.box_2d.length < 4) return;
+        const [ymin, xmin, ymax, xmax] = person.box_2d;
+        const bx = Math.max(6, (xmin / 1000) * W);
+        const by = Math.max(6, (ymin / 1000) * H);
+        const bw = Math.min(W - bx - 6, Math.max(18, ((xmax - xmin) / 1000) * W));
+        const bh = Math.min(H - by - 6, Math.max(20, ((ymax - ymin) / 1000) * H));
+        if (bw > W * 0.78 || bh > H * 0.96) return;
+
+        const hRatio = bh / H;
+        if (hRatio > maxReturnedHeightRatio) maxReturnedHeightRatio = hRatio;
+
+        rawBoxes.push({
+          bbox: [bx, by, bw, bh],
+          status: String(person.status).toLowerCase(),
+          score: 0.9,
+        });
+      });
+
+      if (rawBoxes.length === 0) return;
+
+      // Update Hysteresis State if a single close-up person (height >= 28% or 1 person in room) is returned
+      const hyst = scaleHysteresisRef.current;
+      if (maxReturnedHeightRatio >= 0.28 || (rawBoxes.length === 1 && maxReturnedHeightRatio >= 0.20)) {
+        hyst.latchedCloseUpMode = true;
+        hyst.sessionPeakHeightRatio = Math.max(hyst.sessionPeakHeightRatio, maxReturnedHeightRatio);
+      }
+
+      const isCloseUp = hyst.latchedCloseUpMode;
+      const filteredBoxes = applyContainmentNMS(rawBoxes, isCloseUp);
+
+      hasNeuralCalibrationRef.current = true;
+      const tracks = tracksRef.current;
+      const matchedTrackIds = new Set<number>();
+      const snapPos = snapshotTrackPositionsRef.current;
+
+      filteredBoxes.forEach((item) => {
+        const [bx, by, bw, bh] = item.bbox;
+        const isFaintedStatus = item.status === 'fainted';
+
+        // Find best matching existing track using IoU > 0.35 or close proximity
+        let bestTrack: TrackedPersonState | null = null;
+        let bestIoU = 0;
+        let bestDist = Infinity;
+
+        tracks.forEach((tr) => {
+          if (matchedTrackIds.has(tr.id)) return;
+
+          // Compensate for optical-flow drift accumulated since the snapshot was captured!
+          const origPos = snapPos[tr.id];
+          const driftX = origPos ? tr.bbox[0] - origPos[0] : 0;
+          const driftY = origPos ? tr.bbox[1] - origPos[1] : 0;
+          const compensatedBox: [number, number, number, number] = [
+            Math.max(4, Math.min(W - bw - 4, bx + driftX)),
+            Math.max(4, Math.min(H - bh - 4, by + driftY)),
+            bw,
+            bh,
+          ];
+
+          const iou = boxIoU(tr.bbox, compensatedBox);
+          const dist = centerDist(tr.bbox, compensatedBox);
+
+          if (isCloseUp) {
+            bestTrack = tr;
+            bestIoU = Math.max(0.5, iou);
+          } else if (iou > 0.35 && iou > bestIoU) {
+            bestIoU = iou;
+            bestTrack = tr;
+          } else if (bestIoU === 0 && dist < 52 && dist < bestDist) {
+            bestDist = dist;
+            bestTrack = tr;
+          }
+        });
+
+        if (bestTrack) {
+          const tr = bestTrack as TrackedPersonState;
+          matchedTrackIds.add(tr.id);
+          tr.missedFrames = 0;
+          tr.neuralVerified = true;
+          tr.ageFrames = Math.max(tr.ageFrames, 4);
+
+          const origPos = snapPos[tr.id];
+          const driftX = origPos ? tr.bbox[0] - origPos[0] : 0;
+          const driftY = origPos ? tr.bbox[1] - origPos[1] : 0;
+          const targetBox: [number, number, number, number] = [
+            Math.max(4, Math.min(W - bw - 4, bx + driftX)),
+            Math.max(4, Math.min(H - bh - 4, by + driftY)),
+            bw,
+            bh,
+          ];
+
+          // Soft EMA interpolation (alpha = 0.25) so boxes NEVER snap or jump on screen!
+          if (!tr.isFallen || !tr.faintLockedBbox) {
+            const blendAlpha = bestIoU > 0.35 ? 0.28 : 0.20;
+            tr.bbox = [
+              tr.bbox[0] * (1 - blendAlpha) + targetBox[0] * blendAlpha,
+              tr.bbox[1] * (1 - blendAlpha) + targetBox[1] * blendAlpha,
+              tr.bbox[2] * (1 - blendAlpha) + targetBox[2] * blendAlpha,
+              tr.bbox[3] * (1 - blendAlpha) + targetBox[3] * blendAlpha,
+            ];
+          }
+
+          if (isFaintedStatus) {
+            // Neural model confirmed person is lying collapsed on the floor -> commit Indefinite Lock!
+            tr.isFallen = true;
+            tr.isVerifyingFall = false;
+            tr.neuralFaintConfirmed = true;
+            tr.faintLockedBbox = tr.faintLockedBbox || [...item.bbox];
+            tr.faintStartTime = tr.faintStartTime || now;
+            tr.faintReason = 'Floor Faint Confirmed & Locked Indefinitely';
+            tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.faintLockedBbox);
+          }
+        } else if (!isCloseUp || tracks.length === 0) {
+          if (tracks.length < 28) {
+            const id = nextTrackIdRef.current++;
+            const newTrack: TrackedPersonState = {
+              id,
+              bbox: [...item.bbox],
+              standingBaselineBbox: isFaintedStatus ? null : [...item.bbox],
+              peakHeight: isFaintedStatus ? 0 : bh,
+              baselineTopY: isFaintedStatus ? H : by,
+              vx: 0,
+              vy: 0,
+              speedPx: 0,
+              ageFrames: 4,
+              missedFrames: 0,
+              standingFrames: isFaintedStatus ? 0 : 4,
+              collapseCandidateStartMs: isFaintedStatus ? now - 2000 : null,
+              isVerifyingFall: false,
+              verifyProgressSec: 0,
+              isFallen: isFaintedStatus,
+              faintLockedBbox: isFaintedStatus ? [...item.bbox] : null,
+              faintStartTime: isFaintedStatus ? now : null,
+              faintReason: isFaintedStatus ? 'Floor Faint Confirmed & Locked Indefinitely' : '',
+              neuralFaintConfirmed: isFaintedStatus,
+              neuralVerified: true,
+              smoothedKeypoints: isFaintedStatus
+                ? buildFrozenFloorKeypoints(item.bbox)
+                : buildStandingKeypoints(item.bbox, id),
+              psoKeypointsMap: {},
+              torsoColor: 'BLUE',
+              hsvMatchPct: 0,
+            };
+            tracks.push(newTrack);
+            matchedTrackIds.add(id);
+          }
+        }
+      });
+
+      // CRITICAL: Never delete any track that is already faint-locked (`tr.isFallen`) or in Close-Up Mode!
+      tracksRef.current = tracks.filter(
+        (tr) => tr.isFallen || isCloseUp || matchedTrackIds.has(tr.id)
+      );
+    },
+    []
+  );
 
   useEffect(() => {
     const videoEl = videoRef.current;
@@ -451,6 +707,16 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     setVideoProgress(newTime);
     if (videoEl && !Number.isNaN(newTime)) {
       videoEl.currentTime = newTime;
+      lastNeuralTimeRef.current = 0;
+      if (newTime < 0.5 && !manualFallOverride) {
+        tracksRef.current.forEach((tr) => {
+          tr.isFallen = false;
+          tr.isVerifyingFall = false;
+          tr.faintLockedBbox = null;
+          tr.faintStartTime = null;
+          tr.collapseCandidateStartMs = null;
+        });
+      }
     }
   };
 
@@ -463,22 +729,20 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         const next = !prev;
         const tracks = tracksRef.current;
         if (next && tracks.length > 0) {
-          // Lock the most horizontal or first tracked person as fainted
-          const target = tracks.reduce((best, curr) =>
-            curr.bbox[2] / Math.max(1, curr.bbox[3]) > best.bbox[2] / Math.max(1, best.bbox[3])
-              ? curr
-              : best
-          );
+          const target = tracks[0];
           target.isFallen = true;
+          target.isVerifyingFall = false;
           target.faintLockedBbox = [...target.bbox];
           target.faintStartTime = performance.now();
-          target.faintReason = 'Manual Faint Override';
+          target.faintReason = 'Manual Faint Override (Locked Indefinitely)';
           target.smoothedKeypoints = buildFrozenFloorKeypoints(target.bbox);
         } else if (!next) {
           tracks.forEach((t) => {
             t.isFallen = false;
+            t.isVerifyingFall = false;
             t.faintLockedBbox = null;
             t.faintStartTime = null;
+            t.collapseCandidateStartMs = null;
           });
         }
         return next;
@@ -508,7 +772,6 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     let lastFrameTimestamp = performance.now();
     let smoothedFps = 34.0;
 
-    // High-Resolution 240x135 Analysis Canvas (4x4 px cells on 960x540) for Wide-Angle Crowd & Gym CCTV
     const GW = 240;
     const GH = 135;
     if (!offscreenCanvasRef.current) {
@@ -516,6 +779,12 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
       off.width = GW;
       off.height = GH;
       offscreenCanvasRef.current = off;
+    }
+    if (!snapshotCanvasRef.current) {
+      const sc = document.createElement('canvas');
+      sc.width = 640;
+      sc.height = 360;
+      snapshotCanvasRef.current = sc;
     }
 
     const renderLoop = (now: number) => {
@@ -527,14 +796,16 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
       const canvas = canvasRef.current;
       const videoEl = videoRef.current;
       const offCanvas = offscreenCanvasRef.current;
+      const snapCanvas = snapshotCanvasRef.current;
 
-      if (canvas && offCanvas) {
+      if (canvas && offCanvas && snapCanvas) {
         const ctx = canvas.getContext('2d');
         const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+        const snapCtx = snapCanvas.getContext('2d');
         const W = canvas.width;
         const H = canvas.height;
 
-        if (ctx && offCtx) {
+        if (ctx && offCtx && snapCtx) {
           const detectedSubjects: DetectedSubject[] = [];
 
           const hasLiveVideoFrame =
@@ -547,14 +818,15 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             if (inputSource === 'upload' && videoEl.duration) {
               setVideoProgress(videoEl.currentTime);
               setVideoDuration(videoEl.duration);
-              // Reset faint lock if video loops back to 0.0s
+              // Unlock only if video loops back to very beginning (t < 0.25s) so user can watch standing -> faint again
               if (videoEl.currentTime < 0.25 && !manualFallOverride) {
                 tracksRef.current.forEach((tr) => {
-                  if (tr.isPrimaryCloseUp) {
+                  if (!tr.neuralFaintConfirmed) {
                     tr.isFallen = false;
+                    tr.isVerifyingFall = false;
                     tr.faintLockedBbox = null;
                     tr.faintStartTime = null;
-                    tr.faintFrames = 0;
+                    tr.collapseCandidateStartMs = null;
                   }
                 });
               }
@@ -565,28 +837,61 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             const imgData = offCtx.getImageData(0, 0, GW, GH);
             const data = imgData.data;
 
-            const scaleX = W / GW; // 4.0
-            const scaleY = H / GH; // 4.0
+            const scaleX = W / GW;
+            const scaleY = H / GH;
 
             // =========================================================================
-            // STAGE 1: MEDIAPIPE MULTI-POSE & OBJECT DETECTOR (Close & Medium Subjects)
+            // 1. ASYNC NEURAL GROUND-TRUTH SNAPSHOT (/api/analyze-frame)
+            // Captures track positions at snapshot time for IoU > 0.35 drift compensation
             // =========================================================================
-            interface RawCandidate {
+            if (!neuralBusyRef.current && now - lastNeuralTimeRef.current > 1800) {
+              neuralBusyRef.current = true;
+              lastNeuralTimeRef.current = now;
+
+              const posMap: Record<number, [number, number]> = {};
+              tracksRef.current.forEach((tr) => {
+                posMap[tr.id] = [tr.bbox[0], tr.bbox[1]];
+              });
+              snapshotTrackPositionsRef.current = posMap;
+
+              snapCtx.drawImage(videoEl, 0, 0, 640, 360);
+              const jpegBase64 = snapCanvas.toDataURL('image/jpeg', 0.72);
+
+              fetch('/api/analyze-frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageBase64: jpegBase64 }),
+              })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((res) => {
+                  if (res && Array.isArray(res.people) && res.people.length > 0) {
+                    reconcileServerNeuralDetections(res.people, W, H, performance.now());
+                  }
+                })
+                .catch(() => {})
+                .finally(() => {
+                  neuralBusyRef.current = false;
+                });
+            }
+
+            // =========================================================================
+            // 2. CLIENT-SIDE MEDIAPIPE POSE LANDMARKER & FULL-FRAME OBJECT DETECTOR
+            // =========================================================================
+            interface FrameCandidate {
               bbox: [number, number, number, number];
-              keypoints?: PoseKeypoint[];
+              keypointsMap?: Record<string, PoseKeypoint>;
               torsoAngleDeg?: number;
               foreshortenedFloor?: boolean;
               fromPose: boolean;
-              isProneFloorShape: boolean;
+              score: number;
             }
 
-            const candidates: RawCandidate[] = [];
+            const rawCandidates: FrameCandidate[] = [];
 
             if (videoEl.currentTime !== lastVideoTimeRef.current) {
               lastVideoTimeRef.current = videoEl.currentTime;
               const tsMs = performance.now();
 
-              // 1A. PoseLandmarker (up to 5 poses)
               if (poseLandmarkerRef.current) {
                 try {
                   const poseResult = poseLandmarkerRef.current.detectForVideo(videoEl, tsMs);
@@ -614,7 +919,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                         { idx: 28, name: 'r_ankle' },
                       ];
 
-                      const kps: PoseKeypoint[] = [];
+                      const kpsMap: Record<string, PoseKeypoint> = {};
                       keypointMap.forEach(({ idx, name }) => {
                         const pt = lm[idx];
                         const vis = pt?.visibility ?? 0;
@@ -624,12 +929,12 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                           if (pt.x > maxX) maxX = pt.x;
                           if (pt.y < minY) minY = pt.y;
                           if (pt.y > maxY) maxY = pt.y;
-                          kps.push({
+                          kpsMap[name] = {
                             name,
                             x: pt.x * W,
                             y: pt.y * H,
                             confidence: vis,
-                          });
+                          };
                         }
                       });
 
@@ -642,8 +947,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                         const bw = Math.min(W - bx - 6, (maxX - minX + padX * 2) * W);
                         const bh = Math.min(H - by - 6, (maxY - minY + padYTop + padYBot) * H);
 
-                        // Reject absurd full-screen false positives
-                        if (bw < W * 0.72 && bh < H * 0.94 && bw >= 24 && bh >= 28) {
+                        if (bw >= 24 && bh >= 28 && bw < W * 0.72 && bh < H * 0.94) {
                           let torsoAngleDeg = 10.0;
                           let foreshortenedFloor = false;
                           const lSh = lm[11];
@@ -660,29 +964,28 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                             torsoAngleDeg =
                               Math.round(((Math.atan2(dx, dy) * 180) / Math.PI) * 10) / 10;
                             const torsoNormDy = Math.abs(shMidY - hipMidY);
-                            if (shMidY > 0.49 || (torsoNormDy < 0.13 && minY > 0.43)) {
+                            if (shMidY > 0.48 || (torsoNormDy < 0.14 && minY > 0.42)) {
                               foreshortenedFloor = true;
                             }
                           }
 
-                          candidates.push({
+                          rawCandidates.push({
                             bbox: [bx, by, bw, bh],
-                            keypoints: kps,
+                            keypointsMap: kpsMap,
                             torsoAngleDeg,
                             foreshortenedFloor,
                             fromPose: true,
-                            isProneFloorShape: bw > bh * 1.12 || foreshortenedFloor,
+                            score: 0.95,
                           });
                         }
                       }
                     });
                   }
                 } catch {
-                  // Continue to ObjectDetector + Connected Components
+                  // Continue
                 }
               }
 
-              // 1B. MediaPipe ObjectDetector ('person', up to 25 boxes)
               if (objectDetectorRef.current) {
                 try {
                   const objResult = objectDetectorRef.current.detectForVideo(videoEl, tsMs + 1);
@@ -692,40 +995,35 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
 
                     objResult.detections.forEach((det) => {
                       const bb = det.boundingBox;
-                      if (!bb) return;
-                      const bx = Math.max(4, bb.originX * scaleVidX);
-                      const by = Math.max(4, bb.originY * scaleVidY);
-                      const bw = Math.min(W - bx - 4, bb.width * scaleVidX);
-                      const bh = Math.min(H - by - 4, bb.height * scaleVidY);
+                      const score = det.categories?.[0]?.score ?? 0.35;
+                      if (!bb || score < 0.3) return;
+                      const bx = Math.max(6, bb.originX * scaleVidX);
+                      const by = Math.max(6, bb.originY * scaleVidY);
+                      const bw = Math.min(W - bx - 6, bb.width * scaleVidX);
+                      const bh = Math.min(H - by - 6, bb.height * scaleVidY);
 
-                      if (bw >= 18 && bh >= 22 && bw < W * 0.65 && bh < H * 0.92) {
-                        const overlapsExisting = candidates.some(
-                          (c) => boxIoU(c.bbox, [bx, by, bw, bh]) > 0.35
-                        );
-                        if (!overlapsExisting) {
-                          candidates.push({
-                            bbox: [bx, by, bw, bh],
-                            fromPose: false,
-                            isProneFloorShape: bw > bh * 1.12,
-                          });
-                        }
+                      if (bw >= 20 && bh >= 24 && bw < W * 0.68 && bh < H * 0.93) {
+                        rawCandidates.push({
+                          bbox: [bx, by, bw, bh],
+                          fromPose: false,
+                          score,
+                        });
                       }
                     });
                   }
                 } catch {
-                  // Continue to Connected-Component Crowd Segmentation
+                  // Continue
                 }
               }
             }
 
             // =========================================================================
-            // STAGE 2: HIGH-RES CONNECTED-COMPONENT CROWD & GYM FLOOR SEGMENTATION
-            // Detects 15-25+ smaller students in wide-angle gym/courtyard CCTV videos
-            // AND detects stationary fainted students lying on the court floor!
+            // 3. 60-FRAME PEAK-HEIGHT HYSTERESIS SCENE ROUTER & FLOOR CONTINUITY
             // =========================================================================
             const numPixels = GW * GH;
             const gray = new Uint8Array(numPixels);
-            const fgMask = new Uint8Array(numPixels);
+            const motionMask = new Uint8Array(numPixels);
+            const prevGray = prevGrayRef.current;
 
             if (!bgModelRef.current || bgModelRef.current.length !== numPixels) {
               bgModelRef.current = new Float32Array(numPixels);
@@ -735,228 +1033,173 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                   (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
               }
             }
-
-            const prevGray = prevGrayRef.current;
             const bgModel = bgModelRef.current;
 
-            // Estimate court/floor median luminance & warm wood / floor tone across central court region
-            let floorLumaSum = 0;
-            let floorSamples = 0;
-            for (let y = Math.floor(GH * 0.25); y < Math.floor(GH * 0.85); y += 4) {
-              for (let x = Math.floor(GW * 0.15); x < Math.floor(GW * 0.85); x += 4) {
-                const idx = (y * GW + x) * 4;
-                const luma = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
-                if (luma > 75 && luma < 225) {
-                  floorLumaSum += luma;
-                  floorSamples++;
-                }
-              }
-            }
-            const avgFloorLuma = floorSamples > 0 ? floorLumaSum / floorSamples : 145;
+            let frameMotionCount = 0;
+            let motionMinX = GW;
+            let motionMaxX = 0;
+            let motionMinY = GH;
+            let motionMaxY = 0;
 
-            // Build foreground mask combining temporal motion + human silhouette contrast against court floor
-            for (let y = 10; y < GH - 8; y++) {
-              for (let x = 8; x < GW - 12; x++) {
+            for (let y = 8; y < GH - 6; y++) {
+              for (let x = 10; x < GW - 10; x++) {
                 const pIdx = y * GW + x;
                 const idx = pIdx * 4;
-                const r = data[idx];
-                const g = data[idx + 1];
-                const b = data[idx + 2];
-                const luma = (r * 77 + g * 150 + b * 29) >> 8;
+                const luma = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
                 gray[pIdx] = luma;
 
-                const motionDiff = prevGray ? Math.abs(luma - prevGray[pIdx]) : 0;
-                const bgDiff = Math.abs(luma - bgModel[pIdx]);
-
-                // Slowly adapt background model where there is no motion
-                if (motionDiff < 10) {
-                  bgModel[pIdx] = bgModel[pIdx] * 0.985 + luma * 0.015;
-                }
-
-                // Check if pixel belongs to a student silhouette on the court/floor:
-                // 1) Moving pixel (motionDiff > 15 or bgDiff > 26)
-                // 2) Dark human clothing/shorts/hair contrasting strongly with bright wood court floor
-                //    (excludes wood floor which has warm R > G > B and luma near avgFloorLuma)
-                const isWoodOrBrightWall =
-                  (r > g + 14 && g > b + 10 && luma > avgFloorLuma - 38) || luma > 188;
-
-                // Exclude top-left camera overlay region & far-right bleachers
-                const inOverlayZone = x < 98 && y < 16;
-                const inFarRightBleachers = x > GW * 0.88 && y > GH * 0.36;
-                const inTopWall = y < GH * 0.12;
-
-                if (!inOverlayZone && !inFarRightBleachers && !inTopWall) {
-                  const isStrongDarkApparel =
-                    !isWoodOrBrightWall && luma < Math.min(92, avgFloorLuma - 48);
-                  const isMovingPerson = motionDiff >= 14 || bgDiff >= 25;
-
-                  if (isMovingPerson || isStrongDarkApparel) {
-                    fgMask[pIdx] = 1;
-                  }
+                const mDiff = prevGray ? Math.abs(luma - prevGray[pIdx]) : 0;
+                if (mDiff >= 16) {
+                  motionMask[pIdx] = 1;
+                  frameMotionCount++;
+                  if (x < motionMinX) motionMinX = x;
+                  if (x > motionMaxX) motionMaxX = x;
+                  if (y < motionMinY) motionMinY = y;
+                  if (y > motionMaxY) motionMaxY = y;
+                } else if (mDiff < 8) {
+                  bgModel[pIdx] = bgModel[pIdx] * 0.992 + luma * 0.008;
                 }
               }
             }
             prevGrayRef.current = gray;
 
-            // Morphological 3x3 Density Filter: Removes 1-pixel court lines & specular floor glare!
-            const filteredMask = new Uint8Array(numPixels);
-            for (let y = 11; y < GH - 9; y++) {
-              for (let x = 9; x < GW - 13; x++) {
-                const pIdx = y * GW + x;
-                if (!fgMask[pIdx]) continue;
-                let neighbors = 0;
-                for (let dy = -1; dy <= 1; dy++) {
-                  const rowOffset = (y + dy) * GW + x;
-                  for (let dx = -1; dx <= 1; dx++) {
-                    if (fgMask[rowOffset + dx]) neighbors++;
-                  }
-                }
-                // Court lines are 1px thin (<= 3 neighbors); human bodies are solid 2D clusters (>= 5 neighbors)
-                if (neighbors >= 5) {
-                  filteredMask[pIdx] = 1;
-                }
+            // Update 60-frame peak height hysteresis buffer
+            let currentFrameMaxHeightRatio = 0;
+            rawCandidates.forEach((c) => {
+              const r = c.bbox[3] / H;
+              if (r > currentFrameMaxHeightRatio) currentFrameMaxHeightRatio = r;
+            });
+
+            const hyst = scaleHysteresisRef.current;
+            if (currentFrameMaxHeightRatio > 0) {
+              hyst.trailingMaxHeights.push(currentFrameMaxHeightRatio);
+              if (hyst.trailingMaxHeights.length > 60) {
+                hyst.trailingMaxHeights.shift();
               }
             }
+            const trailingPeak =
+              hyst.trailingMaxHeights.length > 0
+                ? Math.max(...hyst.trailingMaxHeights)
+                : 0;
+            hyst.sessionPeakHeightRatio = Math.max(hyst.sessionPeakHeightRatio, trailingPeak);
 
-            // Connected-Component BFS Clustering with small-gap bridging (radius 2)
-            const visited = new Uint8Array(numPixels);
-            const bfsQueue = new Int32Array(numPixels);
+            // Latch Close-Up Mode if peak height >= 28% OR if webcam is active OR if<= 2 people with height >= 22%
+            if (
+              inputSource === 'webcam' ||
+              hyst.sessionPeakHeightRatio >= 0.28 ||
+              trailingPeak >= 0.28 ||
+              (rawCandidates.length === 1 && currentFrameMaxHeightRatio >= 0.22)
+            ) {
+              hyst.latchedCloseUpMode = true;
+            }
 
-            for (let y = 11; y < GH - 9; y++) {
-              for (let x = 9; x < GW - 13; x++) {
-                const startIdx = y * GW + x;
-                if (!filteredMask[startIdx] || visited[startIdx]) continue;
+            // Close-Up Floor Silhouette Continuity Fallback:
+            // If PoseLandmarker & ObjectDetector missed a foreshortened person lying flat on the room floor
+            // (as in image_f7dfc550.png), scan the central floor aisle for a human body silhouette!
+            if (rawCandidates.length === 0 && (hyst.latchedCloseUpMode || tracksRef.current.length <= 1)) {
+              // Check central floor corridor (x: 28%..70%, y: 45%..92%) for strong human body contrast (dark pants/hair or teal/colored top vs light floor)
+              let floorBodyPixels = 0;
+              let fbMinX = GW;
+              let fbMaxX = 0;
+              let fbMinY = GH;
+              let fbMaxY = 0;
 
-                let qHead = 0;
-                let qTail = 0;
-                bfsQueue[qTail++] = startIdx;
-                visited[startIdx] = 1;
+              const xStart = Math.floor(GW * 0.30);
+              const xEnd = Math.floor(GW * 0.68);
+              const yStart = Math.floor(GH * 0.48);
+              const yEnd = Math.floor(GH * 0.90);
 
-                let minGX = x;
-                let maxGX = x;
-                let minGY = y;
-                let maxGY = y;
-                let cellCount = 0;
+              for (let y = yStart; y <= yEnd; y++) {
+                for (let x = xStart; x <= xEnd; x++) {
+                  const pIdx = y * GW + x;
+                  const idx = pIdx * 4;
+                  const r = data[idx];
+                  const g = data[idx + 1];
+                  const b = data[idx + 2];
+                  const luma = gray[pIdx];
+                  const [h, s] = rgbToOpenCvHsv(r, g, b);
 
-                while (qHead < qTail) {
-                  const curr = bfsQueue[qHead++];
-                  const cy = Math.floor(curr / GW);
-                  const cx = curr - cy * GW;
-                  cellCount++;
+                  // Dark leggings/pants on light linoleum floor OR saturated teal/blue/red shirt on floor
+                  const isDarkLeggingsOnFloor = luma < 62 && x > GW * 0.38 && x < GW * 0.64;
+                  const isTealOrColoredTopOnFloor = s > 95 && luma > 55 && luma < 195 && (h >= 75 && h <= 130);
 
-                  if (cx < minGX) minGX = cx;
-                  if (cx > maxGX) maxGX = cx;
-                  if (cy < minGY) minGY = cy;
-                  if (cy > maxGY) maxGY = cy;
-
-                  // Search 5x5 neighborhood to bridge white shirt + dark shorts/head into a single student
-                  for (let dy = -2; dy <= 2; dy++) {
-                    const ny = cy + dy;
-                    if (ny < 10 || ny >= GH - 8) continue;
-                    const nRow = ny * GW;
-                    for (let dx = -2; dx <= 2; dx++) {
-                      const nx = cx + dx;
-                      if (nx < 8 || nx >= GW - 12) continue;
-                      const nIdx = nRow + nx;
-                      if (filteredMask[nIdx] && !visited[nIdx]) {
-                        visited[nIdx] = 1;
-                        bfsQueue[qTail++] = nIdx;
-                      }
-                    }
-                  }
-                }
-
-                const blobW = (maxGX - minGX + 2) * scaleX;
-                const blobH = (maxGY - minGY + 2) * scaleY;
-                const blobX = Math.max(6, minGX * scaleX - 4);
-                const blobY = Math.max(6, minGY * scaleY - 6);
-
-                // Filter valid human-sized blobs (excludes tiny noise and huge court walls/bleachers)
-                if (
-                  cellCount >= 6 &&
-                  blobW >= 18 &&
-                  blobH >= 20 &&
-                  blobW <= 260 &&
-                  blobH <= 380
-                ) {
-                  // If multiple standing students are clustered side-by-side (e.g. group under basketball hoop),
-                  // split wide tall blobs into individual student columns!
-                  if (blobW > 72 && blobH >= 52 && blobW < 220 && blobY > H * 0.22) {
-                    const numSplits = Math.min(4, Math.max(2, Math.round(blobW / 42)));
-                    const subW = blobW / numSplits;
-                    for (let s = 0; s < numSplits; s++) {
-                      const sx = blobX + s * subW;
-                      const subBox: [number, number, number, number] = [sx, blobY, subW - 2, blobH];
-                      const overlaps = candidates.some((c) => boxIoU(c.bbox, subBox) > 0.35);
-                      if (!overlaps) {
-                        candidates.push({
-                          bbox: subBox,
-                          fromPose: false,
-                          isProneFloorShape: false,
-                        });
-                      }
-                    }
-                  } else {
-                    // Single student blob (standing OR sprawled/fainted on the gym floor!)
-                    // Check if there is a white/light shirt adjacent to a prone floor student (like the fainted student on the right!)
-                    let adjBox: [number, number, number, number] = [blobX, blobY, blobW, blobH];
-                    const aspect = blobW / Math.max(1, blobH);
-                    const isProne =
-                      (aspect >= 1.08 && blobH <= 72 && blobY > H * 0.22) ||
-                      (blobW >= 24 && blobH <= 38 && aspect >= 0.92 && blobY > H * 0.24);
-
-                    if (isProne) {
-                      // Pad prone floor bounding box slightly to encompass white t-shirt + legs on the floor
-                      adjBox = [
-                        Math.max(8, blobX - 8),
-                        Math.max(8, blobY - 6),
-                        Math.min(W - blobX, Math.max(46, blobW + 16)),
-                        Math.min(H - blobY, Math.max(34, blobH + 12)),
-                      ];
-                    }
-
-                    const overlaps = candidates.some(
-                      (c) => boxIoU(c.bbox, adjBox) > 0.32 || centerDist(c.bbox, adjBox) < 24
-                    );
-                    if (!overlaps) {
-                      candidates.push({
-                        bbox: adjBox,
-                        fromPose: false,
-                        isProneFloorShape: isProne,
-                      });
-                    }
+                  if (isDarkLeggingsOnFloor || isTealOrColoredTopOnFloor) {
+                    floorBodyPixels++;
+                    if (x < fbMinX) fbMinX = x;
+                    if (x > fbMaxX) fbMaxX = x;
+                    if (y < fbMinY) fbMinY = y;
+                    if (y > fbMaxY) fbMaxY = y;
                   }
                 }
               }
+
+              if (floorBodyPixels >= 38) {
+                const bx = Math.max(12, (fbMinX - 3) * scaleX);
+                const by = Math.max(12, (fbMinY - 3) * scaleY);
+                const bw = Math.min(W - bx - 12, Math.max(120, (fbMaxX - fbMinX + 6) * scaleX));
+                const bh = Math.min(H - by - 12, Math.max(130, (fbMaxY - fbMinY + 6) * scaleY));
+
+                hyst.latchedCloseUpMode = true;
+                rawCandidates.push({
+                  bbox: [bx, by, bw, bh],
+                  foreshortenedFloor: true,
+                  fromPose: false,
+                  score: 0.85,
+                });
+              } else if (frameMotionCount >= 28 && hyst.latchedCloseUpMode) {
+                const bx = Math.max(12, motionMinX * scaleX);
+                const by = Math.max(12, motionMinY * scaleY);
+                const bw = Math.min(W * 0.48, Math.max(110, (motionMaxX - motionMinX + 6) * scaleX));
+                const bh = Math.min(H * 0.85, Math.max(130, (motionMaxY - motionMinY + 6) * scaleY));
+                rawCandidates.push({
+                  bbox: [bx, by, bw, bh],
+                  fromPose: false,
+                  score: 0.65,
+                });
+              }
             }
 
-            // Determine if this frame is a Wide-Angle Multi-Person Crowd/Gym Video vs Close-Up Single Person
-            const isCrowdScene = candidates.length >= 3 || tracksRef.current.length >= 3;
+            const isCloseUpMode = hyst.latchedCloseUpMode;
+            setSceneScaleLabel(isCloseUpMode ? 'Close-Up Mode' : 'Wide Crowd Mode');
+
+            // Apply Containment NMS: In Close-Up Mode, guarantees strictly 1 unified box on the person!
+            const nmsCandidates = applyContainmentNMS(rawCandidates, isCloseUpMode);
 
             // =========================================================================
-            // STAGE 3: MULTI-OBJECT TRACKER & PER-PERSON FAINT MEMORY ENGINE
+            // 4. UPDATE TRACKS + TWO-STAGE TEMPORAL IMMOBILITY GATE (1.5s) -> INDEFINITE LOCK
             // =========================================================================
             const tracks = tracksRef.current;
+
+            // If Close-Up Mode is active and multiple old tracks somehow existed, collapse to the primary one
+            if (isCloseUpMode && tracks.length > 1) {
+              const primary = tracks.find((t) => t.isFallen) || tracks[0];
+              tracksRef.current = [primary];
+            }
+
+            const activeTracks = tracksRef.current;
             const matchedTrackIds = new Set<number>();
             const matchedCandIndices = new Set<number>();
 
-            // Match existing tracks to current frame candidates by closest center / IoU
-            candidates.forEach((cand, cIdx) => {
-              let bestTrack: MultiPersonTrack | null = null;
-              let bestScore = Infinity;
+            nmsCandidates.forEach((cand, cIdx) => {
+              let bestTrack: TrackedPersonState | null = null;
+              let bestDist = Infinity;
 
-              tracks.forEach((tr) => {
+              activeTracks.forEach((tr) => {
                 if (matchedTrackIds.has(tr.id)) return;
-                const dist = centerDist(tr.bbox, cand.bbox);
-                const maxAllowedDist = tr.isPrimaryCloseUp ? 180 : 65;
-                if (dist < maxAllowedDist && dist < bestScore) {
-                  bestScore = dist;
+                if (isCloseUpMode) {
+                  bestTrack = tr;
+                  bestDist = 0;
+                  return;
+                }
+                const d = centerDist(tr.bbox, cand.bbox);
+                if (d < 65 && d < bestDist) {
+                  bestDist = d;
                   bestTrack = tr;
                 }
               });
 
               if (bestTrack) {
-                const tr = bestTrack as MultiPersonTrack;
+                const tr = bestTrack as TrackedPersonState;
                 matchedTrackIds.add(tr.id);
                 matchedCandIndices.add(cIdx);
                 tr.missedFrames = 0;
@@ -967,13 +1210,13 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 const newCx = cand.bbox[0] + cand.bbox[2] * 0.5;
                 const newCy = cand.bbox[1] + cand.bbox[3] * 0.5;
 
-                tr.vx = tr.vx * 0.6 + (newCx - prevCx) * 0.4;
-                tr.vy = tr.vy * 0.6 + (newCy - prevCy) * 0.4;
+                tr.vx = tr.vx * 0.65 + (newCx - prevCx) * 0.35;
+                tr.vy = tr.vy * 0.65 + (newCy - prevCy) * 0.35;
                 tr.speedPx = Math.hypot(tr.vx, tr.vy);
 
-                // Smooth bounding box unless faint-locked on the floor
+                // Smoothly update bounding box unless already committed to Indefinite Faint Lock
                 if (!tr.isFallen || !tr.faintLockedBbox) {
-                  const alpha = cand.fromPose ? 0.45 : 0.35;
+                  const alpha = cand.fromPose ? 0.38 : 0.28;
                   tr.bbox = [
                     tr.bbox[0] * (1 - alpha) + cand.bbox[0] * alpha,
                     tr.bbox[1] * (1 - alpha) + cand.bbox[1] * alpha,
@@ -984,179 +1227,234 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
 
                 const [bx, by, bw, bh] = tr.bbox;
                 const aspect = bw / Math.max(1, bh);
-                tr.isPrimaryCloseUp = !isCrowdScene && bh > H * 0.35;
 
-                // Update standing baseline height when upright
-                if (aspect < 0.85 && !cand.foreshortenedFloor) {
+                // Smoothly update keypoints when not faint-locked
+                if (!tr.isFallen && cand.keypointsMap) {
+                  Object.entries(cand.keypointsMap).forEach(([kName, pt]) => {
+                    const cx = Math.max(bx, Math.min(bx + bw, pt.x));
+                    const cy = Math.max(by, Math.min(by + bh, pt.y));
+                    const prev = tr.psoKeypointsMap[kName];
+                    tr.psoKeypointsMap[kName] = prev
+                      ? {
+                          name: kName,
+                          x: prev.x * 0.65 + cx * 0.35,
+                          y: prev.y * 0.65 + cy * 0.35,
+                          confidence: pt.confidence,
+                        }
+                      : { name: kName, x: cx, y: cy, confidence: pt.confidence };
+                  });
+                }
+
+                // Check if person is clearly standing upright in upper-to-mid frame
+                const isClearlyStanding =
+                  isCloseUpMode
+                    ? by < H * 0.35 && bh > H * 0.46 && aspect < 0.82 && !cand.foreshortenedFloor
+                    : aspect < 0.85 && !cand.foreshortenedFloor;
+
+                if (isClearlyStanding) {
                   tr.standingFrames++;
-                  tr.faintFrames = Math.max(0, tr.faintFrames - 1);
                   if (bh > tr.peakHeight * 0.85) {
                     tr.peakHeight = Math.max(tr.peakHeight, bh);
                     tr.baselineTopY = Math.min(tr.baselineTopY, by);
                     tr.standingBaselineBbox = [...tr.bbox];
                   }
-                  if (tr.isFallen && tr.standingFrames >= 12 && !manualFallOverride) {
+                  // If they stood back up during the 1.5s verification window, cancel the fall candidate!
+                  if (tr.standingFrames >= 4 && !tr.isFallen) {
+                    tr.collapseCandidateStartMs = null;
+                    tr.isVerifyingFall = false;
+                    tr.verifyProgressSec = 0;
+                  }
+                  // Unlock Indefinite Faint Lock ONLY if the person clearly stands back up for 15+ consecutive frames!
+                  if (tr.isFallen && tr.standingFrames >= 15 && !manualFallOverride) {
                     tr.isFallen = false;
                     tr.faintLockedBbox = null;
                     tr.faintStartTime = null;
+                    tr.collapseCandidateStartMs = null;
+                    tr.isVerifyingFall = false;
                   }
                 } else {
                   tr.standingFrames = 0;
                 }
 
-                // FAINT DETECTION RULES (Works for BOTH Wide-Angle 25-Student Gym AND Close-Up Kitchen Video!)
-                let faintTriggered = false;
-                let reason = '';
-
-                if (tr.isPrimaryCloseUp) {
-                  // Close-Up Single Person 4-Way Biomechanical Faint Detection
+                // Evaluate 4-Way Collapse / Floor Posture Rules
+                if (isCloseUpMode) {
                   const headDropPct =
                     tr.baselineTopY < H ? Math.round(((by - tr.baselineTopY) / H) * 100) : 0;
                   const heightCompPct =
                     tr.peakHeight > 0 ? Math.round((1 - bh / tr.peakHeight) * 100) : 0;
+
                   const sigHeadDropped =
-                    tr.peakHeight > H * 0.4 && headDropPct >= 18 && by > H * 0.42;
+                    tr.peakHeight > H * 0.38 && headDropPct >= 18 && by > H * 0.42;
                   const sigHeightComp =
-                    tr.peakHeight > H * 0.4 && heightCompPct >= 28 && by > H * 0.42;
+                    tr.peakHeight > H * 0.38 && heightCompPct >= 28 && by > H * 0.42;
                   const sigFloorZone =
-                    (by > H * 0.47 && by + bh * 0.5 > H * 0.64) || Boolean(cand.foreshortenedFloor);
-                  const sigAngle = aspect > 1.12 || (cand.torsoAngleDeg ?? 0) > 48;
+                    (by > H * 0.46 && by + bh * 0.5 > H * 0.62) || Boolean(cand.foreshortenedFloor);
+                  const sigAngle = aspect > 1.12 || (cand.torsoAngleDeg ?? 0) > 46;
 
-                  if (sigHeadDropped || sigHeightComp || sigFloorZone || sigAngle) {
-                    faintTriggered = true;
-                    reason = sigHeadDropped
-                      ? `Head dropped ${headDropPct}% onto floor`
-                      : 'Person collapsed onto floor';
-                  }
-                } else {
-                  // Wide-Angle Multi-Person School / Gym Faint Detection:
-                  // 1) Student lying sprawled/horizontally on the gym floor (aspect >= 1.08 or cand.isProneFloorShape)
-                  //    with low translation speed (stationary on the floor, not running!)
-                  // 2) Or student whose height compressed >= 35% from their standing height
-                  const isStationaryProneOnCourt =
-                    (cand.isProneFloorShape || aspect >= 1.10) &&
-                    tr.speedPx < 2.2 &&
-                    by > H * 0.22 &&
-                    by < H * 0.85;
+                  const inCollapsedPosture =
+                    sigHeadDropped || sigHeightComp || sigFloorZone || sigAngle;
 
-                  const isHeightCollapsedStudent =
-                    tr.peakHeight >= 48 &&
-                    bh < tr.peakHeight * 0.65 &&
-                    aspect >= 0.92 &&
-                    tr.speedPx < 2.0;
+                  if (inCollapsedPosture && !tr.isFallen) {
+                    if (!tr.collapseCandidateStartMs) {
+                      tr.collapseCandidateStartMs = now;
+                    }
+                    const elapsedSec = (now - tr.collapseCandidateStartMs) / 1000;
+                    tr.verifyProgressSec = Math.round(elapsedSec * 10) / 10;
 
-                  if (isStationaryProneOnCourt || isHeightCollapsedStudent) {
-                    faintTriggered = true;
-                    reason = 'Student collapsed / lying motionless on gym floor';
-                  }
-                }
+                    // Require 1.5s of continuous floor-zone presence + low motion (or 0.6s if already motionless on the floor at video start)
+                    const requiredPersistenceSec = tr.peakHeight === 0 && sigFloorZone ? 0.6 : 1.5;
 
-                if (faintTriggered) {
-                  tr.faintFrames++;
-                  if (tr.faintFrames >= 3 && !tr.isFallen) {
-                    tr.isFallen = true;
-                    tr.faintLockedBbox = [...tr.bbox];
-                    tr.faintStartTime = now;
-                    tr.faintReason = reason;
-                    tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.bbox);
+                    if (elapsedSec < requiredPersistenceSec) {
+                      tr.isVerifyingFall = true;
+                    } else if (tr.speedPx < 6.5 || sigFloorZone) {
+                      // COMMIT TO INDEFINITE IMMUTABLE FAINT LOCK!
+                      tr.isFallen = true;
+                      tr.isVerifyingFall = false;
+                      tr.faintLockedBbox = [...tr.bbox];
+                      tr.faintStartTime = now;
+                      tr.faintReason = sigHeadDropped
+                        ? `Head dropped ${headDropPct}% & motionless on floor`
+                        : 'Collapsed & motionless on floor (Locked Indefinitely)';
+                      tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.bbox);
+                    }
                   }
                 }
 
-                // Update stabilized keypoints
+                // Select final keypoints for rendering
                 if (tr.isFallen && tr.faintLockedBbox) {
                   tr.smoothedKeypoints = buildFrozenFloorKeypoints(tr.faintLockedBbox);
-                } else if (cand.keypoints && cand.keypoints.length >= 5) {
-                  tr.smoothedKeypoints = cand.keypoints.map((kp) => ({
-                    ...kp,
-                    x: Math.max(bx, Math.min(bx + bw, kp.x)),
-                    y: Math.max(by, Math.min(by + bh, kp.y)),
-                  }));
                 } else {
-                  tr.smoothedKeypoints = buildStandingKeypoints(tr.bbox, now * 0.008 + tr.id);
+                  const psoList = Object.values(tr.psoKeypointsMap);
+                  tr.smoothedKeypoints =
+                    psoList.length >= 5
+                      ? psoList
+                      : buildStandingKeypoints(tr.bbox, now * 0.008 + tr.id);
                 }
               }
             });
 
-            // Create new tracks for unmatched candidates (up to 30 simultaneous students)
-            candidates.forEach((cand, cIdx) => {
+            // Nudge unmatched crowd tracks smoothly with local optical flow
+            if (!isCloseUpMode) {
+              activeTracks.forEach((tr) => {
+                if (matchedTrackIds.has(tr.id) || tr.isFallen) return;
+                const [bx, by, bw, bh] = tr.bbox;
+                const gx1 = Math.max(8, Math.floor((bx - 12) / scaleX));
+                const gx2 = Math.min(GW - 8, Math.ceil((bx + bw + 12) / scaleX));
+                const gy1 = Math.max(8, Math.floor((by - 12) / scaleY));
+                const gy2 = Math.min(GH - 8, Math.ceil((by + bh + 12) / scaleY));
+
+                let sumX = 0;
+                let sumY = 0;
+                let mCount = 0;
+                for (let y = gy1; y <= gy2; y++) {
+                  for (let x = gx1; x <= gx2; x++) {
+                    if (motionMask[y * GW + x]) {
+                      sumX += x * scaleX;
+                      sumY += y * scaleY;
+                      mCount++;
+                    }
+                  }
+                }
+                if (mCount >= 3) {
+                  const targetCx = sumX / mCount;
+                  const targetCy = sumY / mCount;
+                  const currCx = bx + bw * 0.5;
+                  const currCy = by + bh * 0.5;
+                  const dx = Math.max(-4.0, Math.min(4.0, (targetCx - currCx) * 0.25));
+                  const dy = Math.max(-4.0, Math.min(4.0, (targetCy - currCy) * 0.25));
+                  tr.bbox = [bx + dx, by + dy, bw, bh];
+                  tr.smoothedKeypoints = buildStandingKeypoints(tr.bbox, now * 0.008 + tr.id);
+                  tr.missedFrames = 0;
+                }
+              });
+            }
+
+            // Create new track(s) for unmatched candidates
+            nmsCandidates.forEach((cand, cIdx) => {
               if (matchedCandIndices.has(cIdx)) return;
-              if (tracks.length >= 30) return;
+              if (isCloseUpMode && activeTracks.length >= 1) return;
+              if (activeTracks.length >= 28) return;
 
               const id = nextTrackIdRef.current++;
               const [bx, by, bw, bh] = cand.bbox;
               const aspect = bw / Math.max(1, bh);
-              const isPrimaryCloseUp = !isCrowdScene && bh > H * 0.35;
+              const isImmediateFloor = Boolean(cand.foreshortenedFloor) && by > H * 0.45;
 
-              tracks.push({
+              activeTracks.push({
                 id,
                 bbox: [...cand.bbox],
-                standingBaselineBbox: aspect < 0.88 ? [...cand.bbox] : null,
-                peakHeight: aspect < 0.88 ? bh : 0,
-                baselineTopY: aspect < 0.88 ? by : H,
+                standingBaselineBbox: !isImmediateFloor && aspect < 0.88 ? [...cand.bbox] : null,
+                peakHeight: !isImmediateFloor && aspect < 0.88 ? bh : 0,
+                baselineTopY: !isImmediateFloor && aspect < 0.88 ? by : H,
                 vx: 0,
                 vy: 0,
                 speedPx: 0,
-                ageFrames: 1,
+                ageFrames: 3,
                 missedFrames: 0,
-                faintFrames: cand.isProneFloorShape ? 2 : 0,
-                standingFrames: aspect < 0.88 ? 1 : 0,
+                standingFrames: isImmediateFloor ? 0 : 1,
+                collapseCandidateStartMs: isImmediateFloor ? now : null,
+                isVerifyingFall: isImmediateFloor,
+                verifyProgressSec: 0,
                 isFallen: false,
                 faintLockedBbox: null,
                 faintStartTime: null,
                 faintReason: '',
-                smoothedKeypoints:
-                  cand.keypoints && cand.keypoints.length >= 5
-                    ? cand.keypoints
-                    : buildStandingKeypoints(cand.bbox, id),
+                neuralFaintConfirmed: false,
+                neuralVerified: cand.fromPose || cand.score >= 0.45,
+                smoothedKeypoints: cand.keypointsMap
+                  ? Object.values(cand.keypointsMap)
+                  : buildStandingKeypoints(cand.bbox, id),
+                psoKeypointsMap: cand.keypointsMap || {},
                 torsoColor: 'BLUE',
                 hsvMatchPct: 0,
-                isPrimaryCloseUp,
               });
             });
 
-            // Retain faint-locked tracks in memory even if temporarily occluded; prune stale normal tracks
-            tracksRef.current = tracks.filter((tr) => {
+            // INDEFINITE FAINT LOCK RETENTION:
+            // Tracks that are faint-locked (`tr.isFallen`) NEVER expire!
+            // And in Close-Up Mode, if a standing person drops onto the floor and detector loses them, lock their floor position!
+            tracksRef.current = activeTracks.filter((tr) => {
               if (!matchedTrackIds.has(tr.id)) {
                 tr.missedFrames++;
-                // If a close-up person suddenly dropped out of view downward, lock their last floor position!
                 if (
-                  tr.isPrimaryCloseUp &&
+                  isCloseUpMode &&
                   !tr.isFallen &&
-                  tr.missedFrames === 2 &&
-                  (tr.vy > 4 || tr.bbox[1] > H * 0.36)
+                  tr.missedFrames >= 2 &&
+                  (tr.vy > 2.5 || tr.bbox[1] > H * 0.36 || tr.isVerifyingFall)
                 ) {
                   const [lx, ly, lw, lh] = tr.bbox;
-                  const floorY = Math.max(ly, H * 0.52);
-                  const floorH = Math.min(H - floorY - 10, Math.max(140, lh * 0.58));
+                  const floorY = Math.max(ly, H * 0.50);
+                  const floorH = Math.min(H - floorY - 10, Math.max(145, lh * 0.60));
                   const locked: [number, number, number, number] = [lx, floorY, lw, floorH];
                   tr.isFallen = true;
+                  tr.isVerifyingFall = false;
                   tr.faintLockedBbox = locked;
                   tr.bbox = [...locked];
-                  tr.faintStartTime = now;
-                  tr.faintReason = 'Remembered Floor Collapse Position';
+                  tr.faintStartTime = tr.faintStartTime || now;
+                  tr.faintReason = 'Remembered Floor Collapse Position (Locked Indefinitely)';
                   tr.smoothedKeypoints = buildFrozenFloorKeypoints(locked);
                 }
               }
 
-              // Keep faint-locked people in memory for up to 120 missed frames (~4 seconds)
-              if (tr.isFallen) {
-                return tr.missedFrames < 120;
+              // Indefinite retention for fainted person or primary close-up person!
+              if (tr.isFallen || isCloseUpMode) {
+                return true;
               }
-              return tr.missedFrames < 8;
+              if (tr.neuralVerified) {
+                return tr.missedFrames < 95;
+              }
+              return tr.missedFrames < 12;
             });
 
-            // Convert active tracks into DetectedSubjects for rendering & telemetry
+            // Convert active tracks into DetectedSubjects
             let activeFaintSummary: string | null = null;
+            let activeVerifySummary: string | null = null;
 
             tracksRef.current.forEach((tr, idx) => {
-              // Require at least 2 frames of persistence (or immediate if fainted/pose-backed) to avoid 1-frame flicker
-              if (tr.ageFrames < 2 && !tr.isFallen && tracksRef.current.length > 3) return;
-
               const activeBox =
                 tr.isFallen && tr.faintLockedBbox ? tr.faintLockedBbox : tr.bbox;
               const [bx, by, bw, bh] = activeBox;
 
-              // Sample HSV shirt color inside torso region
               const tx1 = Math.max(0, Math.floor((bx + bw * 0.22) / scaleX));
               const tx2 = Math.min(GW - 1, Math.floor((bx + bw * 0.78) / scaleX));
               const ty1 = Math.max(0, Math.floor((by + bh * 0.22) / scaleY));
@@ -1201,12 +1499,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                   : 0;
 
               if (tr.isFallen) {
-                activeFaintSummary = `${tr.faintReason || 'Person Fainted on Floor'} (${faintDurationSec}s)`;
+                activeFaintSummary = `${tr.faintReason || 'Floor Faint Locked Indefinitely'} (${faintDurationSec}s)`;
+              } else if (tr.isVerifyingFall) {
+                activeVerifySummary = `Verifying Floor Immobility (${tr.verifyProgressSec.toFixed(1)}s / 1.5s)...`;
               }
 
               detectedSubjects.push({
                 id: tr.id,
-                label: isCrowdScene ? `Student #${idx + 1}` : `Person #${tr.id}`,
+                label: isCloseUpMode ? 'Person #1' : `Student #${idx + 1}`,
                 bbox: activeBox,
                 lastStandingBbox: tr.standingBaselineBbox || undefined,
                 headRoi: [bx + bw * 0.24, by + bh * 0.04, bw * 0.52, bh * 0.22],
@@ -1218,6 +1518,8 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
                 headDropPct: tr.isFallen ? 42 : 0,
                 heightCompressionPct: tr.isFallen ? 45 : 0,
                 aspectRatio: Math.round((bw / Math.max(1, bh)) * 100) / 100,
+                isVerifyingFall: tr.isVerifyingFall,
+                verifyProgressSec: tr.verifyProgressSec,
                 isFallen: tr.isFallen,
                 isMemoryLocked: tr.isFallen,
                 faintDurationSec,
@@ -1229,6 +1531,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             });
 
             setLockedFaintSummary(activeFaintSummary);
+            setVerifyingFallSummary(activeVerifySummary);
           } else {
             // BUILT-IN DEMO SCENE
             const grad = ctx.createLinearGradient(0, 0, 0, H);
@@ -1345,14 +1648,14 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
           }
 
           // =========================================================================
-          // STAGE 4: RENDER BOUNDING BOXES, PROPORTIONAL SKELETONS & FAINT ALERTS
+          // 5. RENDER BOUNDING BOXES, PROPORTIONAL SKELETONS & FAINT ALERTS
           // =========================================================================
           let frameAlertActive = false;
           let frameGreenWave = false;
           let frameAlertTitle = `All Clear — Tracking ${detectedSubjects.length} ${
             detectedSubjects.length === 1 ? 'Person' : 'Students / People'
           }`;
-          let frameAlertDetail = `Monitoring ${activeCamera.name}. Hospital-to-School route on standby.`;
+          let frameAlertDetail = `Monitoring ${activeCamera.name} (${sceneScaleLabel}). Hospital → Place du Méchouar route on standby.`;
 
           const isCompactCrowd = detectedSubjects.length >= 4;
 
@@ -1360,18 +1663,33 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             const [bx, by, bw, bh] = subj.bbox;
             const [tx, ty, tw, th] = subj.torsoRoi;
 
-            // Draw Last Standing Ghost Box if available
+            // Draw Last Standing Position Ghost Box + Trajectory Line
             if (subj.isFallen && subj.lastStandingBbox) {
               const [sx, sy, sw, sh] = subj.lastStandingBbox;
               ctx.save();
               ctx.strokeStyle = 'rgba(6, 182, 212, 0.65)';
-              ctx.setLineDash([5, 3]);
-              ctx.lineWidth = 1.5;
+              ctx.setLineDash([6, 4]);
+              ctx.lineWidth = 2;
               ctx.strokeRect(sx, sy, sw, sh);
+
+              if (!isCompactCrowd) {
+                ctx.fillStyle = 'rgba(11, 15, 23, 0.85)';
+                ctx.fillRect(sx, Math.max(6, sy - 22), 165, 20);
+                ctx.fillStyle = '#06B6D4';
+                ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
+                ctx.fillText('Last Standing Position', sx + 6, Math.max(20, sy - 8));
+
+                ctx.strokeStyle = '#F59E0B';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(sx + sw / 2, sy + sh * 0.25);
+                ctx.lineTo(bx + bw / 2, by + bh * 0.5);
+                ctx.stroke();
+              }
               ctx.restore();
             }
 
-            // Draw Proportionally Scaled Skeleton strictly inside the person's bounding box
+            // Draw Proportionally Scaled Skeleton
             if (subj.keypoints.length >= 4) {
               ctx.save();
               const kpByName: Record<string, PoseKeypoint> = {};
@@ -1397,6 +1715,8 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               const isSmallBox = bw < 65 || bh < 85;
               ctx.strokeStyle = subj.isFallen
                 ? 'rgba(239, 68, 68, 0.95)'
+                : subj.isVerifyingFall
+                ? 'rgba(245, 158, 11, 0.9)'
                 : 'rgba(6, 182, 212, 0.85)';
               ctx.lineWidth = isSmallBox ? 1.5 : 2.4;
 
@@ -1411,7 +1731,11 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
 
               const dotRadius = isSmallBox ? 2.0 : 3.5;
               subj.keypoints.forEach((pt) => {
-                ctx.fillStyle = subj.isFallen ? '#EF4444' : '#06B6D4';
+                ctx.fillStyle = subj.isFallen
+                  ? '#EF4444'
+                  : subj.isVerifyingFall
+                  ? '#F59E0B'
+                  : '#06B6D4';
                 ctx.beginPath();
                 ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
                 ctx.fill();
@@ -1420,24 +1744,29 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             }
 
             let boxColor = '#10B981';
-            let statusText = isCompactCrowd ? subj.label : `${subj.label} · Standing`;
+            let statusText = isCompactCrowd ? subj.label : `${subj.label} · Standing / Normal`;
 
             if (mode === 'najda') {
               if (subj.isFallen) {
                 boxColor = '#EF4444';
                 statusText =
                   subj.faintDurationSec > 0
-                    ? `FAINT DETECTED · ${subj.label} (${subj.faintDurationSec}s)`
-                    : `FAINT DETECTED · ${subj.label}`;
+                    ? `FAINT DETECTED · ${subj.label} Locked (${subj.faintDurationSec}s)`
+                    : `FAINT DETECTED · ${subj.label} Locked`;
                 frameAlertActive = true;
                 frameGreenWave = true;
-                frameAlertTitle = `Emergency at School — ${subj.label} Fainted!`;
-                frameAlertDetail = `Detected ${detectedSubjects.length} students in view; ${subj.label} collapsed on floor. Hospital → School route is now a GREEN ZONE.`;
+                frameAlertTitle = `Emergency at Place du Méchouar — ${subj.label} Fainted!`;
+                frameAlertDetail = `${subj.label} collapsed & remained motionless on floor. Hospital → Place du Méchouar 5-turn route is now a GREEN ZONE.`;
 
                 if (now - lastAlertTimeRef.current > 7000) {
                   lastAlertTimeRef.current = now;
                   onTriggerAlert(frameAlertTitle, frameAlertDetail);
                 }
+              } else if (subj.isVerifyingFall) {
+                boxColor = '#F59E0B';
+                statusText = `Analyzing Potential Fall... (${(subj.verifyProgressSec ?? 0).toFixed(1)}s / 1.5s)`;
+                frameAlertTitle = `Verifying Floor Immobility — ${subj.label}`;
+                frameAlertDetail = `Checking 1.5s temporal persistence to distinguish a true faint from bending/sitting...`;
               }
             } else if (mode === 'tifawt') {
               if (subj.hsvMatchPct >= 25) {
@@ -1469,19 +1798,22 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
               }
             }
 
-            // Draw Bounding Box + Pulsing Emergency Halo for Fainted Student
             ctx.save();
             if (subj.isFallen) {
-              ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
-              ctx.fillRect(bx - 4, by - 4, bw + 8, bh + 8);
+              ctx.fillStyle = 'rgba(239, 68, 68, 0.20)';
+              ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
 
-              // Pulsing red target beacon around fainted student so operator spots them immediately in a 25-student gym
-              const pulseR = Math.max(bw, bh) * 0.75 + Math.sin(now * 0.008) * 6;
-              ctx.strokeStyle = 'rgba(239, 68, 68, 0.85)';
-              ctx.lineWidth = 2.5;
-              ctx.beginPath();
-              ctx.arc(bx + bw / 2, by + bh / 2, pulseR, 0, Math.PI * 2);
-              ctx.stroke();
+              if (isCompactCrowd) {
+                const pulseR = Math.max(bw, bh) * 0.75 + Math.sin(now * 0.008) * 6;
+                ctx.strokeStyle = 'rgba(239, 68, 68, 0.85)';
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                ctx.arc(bx + bw / 2, by + bh / 2, pulseR, 0, Math.PI * 2);
+                ctx.stroke();
+              }
+            } else if (subj.isVerifyingFall) {
+              ctx.fillStyle = 'rgba(245, 158, 11, 0.14)';
+              ctx.fillRect(bx, by, bw, bh);
             }
 
             ctx.strokeStyle = boxColor;
@@ -1489,8 +1821,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             ctx.strokeRect(bx, by, bw, bh);
             ctx.restore();
 
-            // Draw Clean Label Badge
-            const isSmallLabel = isCompactCrowd && !subj.isFallen;
+            const isSmallLabel = isCompactCrowd && !subj.isFallen && !subj.isVerifyingFall;
             ctx.font = isSmallLabel
               ? '600 10px "Plus Jakarta Sans", sans-serif'
               : '700 12px "Plus Jakarta Sans", sans-serif';
@@ -1514,17 +1845,17 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
             );
           });
 
-          // Top-Left Camera & Crowd Count Overlay
+          // Top-Left Camera & Hysteresis Scale Mode Badge
           ctx.fillStyle = 'rgba(11, 15, 23, 0.84)';
           ctx.beginPath();
-          ctx.roundRect(14, 14, 455, 36, 6);
+          ctx.roundRect(14, 14, 480, 36, 6);
           ctx.fill();
           ctx.fillStyle = '#F8FAFC';
           ctx.font = '600 12px "Plus Jakarta Sans", sans-serif';
           ctx.fillText(
-            `${activeCamera.code}: ${activeCamera.name.split(' (')[0]} · ${
+            `${activeCamera.code}: ${activeCamera.name.split(' (')[0]} · ${sceneScaleLabel} · ${
               detectedSubjects.length
-            } People Tracked`,
+            } ${detectedSubjects.length === 1 ? 'Person' : 'People'}`,
             24,
             36
           );
@@ -1555,8 +1886,10 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
     activeCamera,
     isPlaying,
     poseModelStatus,
+    sceneScaleLabel,
     manualFallOverride,
     manualSecurityOverride,
+    reconcileServerNeuralDetections,
     onTelemetryUpdate,
     onTriggerAlert,
   ]);
@@ -1694,7 +2027,7 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
       {/* Uploaded Video Scrubber Timeline Bar */}
       {inputSource === 'upload' && videoDuration > 0 && (
         <div className="px-4 py-2.5 bg-[#0B0F17] border-t border-[#1E293B] flex items-center gap-3">
-          <span className="text-xs font-mono text-[#94A3B8] shrink-0">
+          <span className="text-xs font-mono tabular-nums text-[#94A3B8] shrink-0">
             {videoProgress.toFixed(1)}s / {videoDuration.toFixed(1)}s
           </span>
           <input
@@ -1716,25 +2049,29 @@ export const VisionCanvas: React.FC<VisionCanvasProps> = ({
         </div>
       )}
 
-      {/* Bottom Bar: Multi-Person Crowd & Faint Memory Status */}
+      {/* Bottom Bar: Dual-Scale Hysteresis & Indefinite Faint-Lock Status */}
       <div className="p-4 bg-[#0B0F17] border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
           <span className="flex items-center gap-1.5 text-[#CBD5E1]">
             {lockedFaintSummary ? (
               <Lock className="w-4 h-4 text-[#EF4444]" />
-            ) : tracksRef.current.length > 1 ? (
-              <Users className="w-4 h-4 text-[#06B6D4]" />
+            ) : verifyingFallSummary ? (
+              <Clock className="w-4 h-4 text-[#F59E0B]" />
             ) : (
-              <History className="w-4 h-4 text-[#06B6D4]" />
+              <Sparkles className="w-4 h-4 text-[#10B981]" />
             )}
-            <strong>Multi-Person Crowd &amp; Faint Engine:</strong>{' '}
+            <strong>{sceneScaleLabel} (60-Frame Hysteresis):</strong>{' '}
             {lockedFaintSummary ? (
               <span className="text-[#EF4444] font-semibold">
-                FAINT LOCKED — {lockedFaintSummary}
+                {lockedFaintSummary}
+              </span>
+            ) : verifyingFallSummary ? (
+              <span className="text-[#F59E0B] font-semibold">
+                {verifyingFallSummary}
               </span>
             ) : (
               <span className="text-[#10B981]">
-                Multi-Person Crowd Segmentation + Prone Floor Faint Detector Active
+                Containment NMS + 1.5s Immobility Gate + Indefinite Floor Lock Active
               </span>
             )}
           </span>

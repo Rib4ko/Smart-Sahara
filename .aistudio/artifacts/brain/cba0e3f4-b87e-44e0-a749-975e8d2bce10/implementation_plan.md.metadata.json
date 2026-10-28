@@ -1,6 +1,6 @@
 {
-  "summary":  "Architectural and UX implementation plan for Sahra-Eye, the Laayoune Smart City Edge AI Vision Engine featuring live browser-native webcam and custom video computer vision triage, CNDP Law 09-08 automatic Gaussian face masking with alert-triggered unmasking, interactive Boulevard Mekka Green-Wave traffic corridor map, WhatsApp/Telegram webhook payload inspector, and complete downloadable Python source code (app.py & vision_engine.py) for Intel OpenVINO + YOLOv8 local deployment.",
-  "updatedAt":  "2026-10-28T13:20:24.579070802Z",
+  "summary":  "Revised implementation plan incorporating the 3 technical risk mitigations: 60-frame trailing peak-height hysteresis for Scene-Scale Routing, 1.5-2.0s temporal immobility verification before committing to an immutable faint lock, and IoU > 0.35 + soft EMA blending for asynchronous neural anchor updates.",
+  "updatedAt":  "2026-10-28T19:56:17.961793779Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

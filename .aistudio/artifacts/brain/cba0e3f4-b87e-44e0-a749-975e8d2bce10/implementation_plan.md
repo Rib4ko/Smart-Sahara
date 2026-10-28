@@ -1,145 +1,106 @@
-# Sahra-Eye: Laâyoune Smart City Edge AI Vision Engine
+# Sahra-Eye: Dual-Scale Adaptive Vision & Indefinite Faint-Lock Architecture
 
-**Sahra-Eye** is an edge-optimized Smart City surveillance, privacy-compliant computer vision, and emergency triage platform designed for the urban ecosystem of **Laâyoune, Morocco**. It pairs a live interactive Web Command Center—capable of processing live webcam streams and uploaded test videos in real time—with a complete, production-ready Python Edge Vision Engine (`app.py` and `vision_engine.py`) built on **FastAPI**, **OpenCV**, **YOLOv8 (`yolov8n-pose.pt` & `yolov8n.pt`)**, and **Intel OpenVINO** for 30+ FPS local execution on Intel Core i7 integrated graphics.
+This revised plan upgrades the Sahra-Eye computer vision pipeline and incorporates all three technical risk mitigations: **Trailing Peak-Height Hysteresis** for scene-scale locking, **1.5–2.0s Temporal Immobility Verification** to distinguish true faints from bending/sitting, and **IoU-Gated Soft Optical-Flow Blending** to eliminate asynchronous bounding-box snapping.
 
----
-
-### User Review & Critical Decisions
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural and UX decisions incorporate your confirmed selections and establish the blueprint for both the interactive web console and the downloadable Python OpenVINO engine:
+> This revision integrates the three blind-spot mitigations directly into the core state machine so neither mid-collapse height shrink nor network latency can cause mode flipping, false crouch triggers, or box jumping.
 
-- **Confirmed Decision 1 — Dual Delivery (Interactive Web Console + Full Python Source Export)**: The platform delivers a functional browser-native Edge Vision Command Center alongside an integrated **Python Edge Code & Architecture Inspector** where you can view, copy, and download the complete `vision_engine.py`, `app.py`, and `requirements.txt` configured for YOLOv8 + Intel OpenVINO (`FP16`/`INT8`) local execution.
-- **Confirmed Decision 2 — Live Webcam & Custom Video File Ingestion**: Operators can switch seamlessly between their **Live Browser Webcam** (`navigator.mediaDevices.getUserMedia`), **Custom Uploaded Test Videos** (MP4/WebM drag-and-drop or file picker), and built-in **Interactive Calibration Streams** to test all three operational modes live in the canvas.
-- **Confirmed Decision 3 — Interactive Laâyoune Map & Boulevard Mekka Green-Wave Corridor**: A geospatial telemetry view of Laâyoune maps real city coordinates (Boulevard Mekka intersections, Place El Méchouar, ONEE Desalination Plant, Protection Civile HQ, and EST Laâyoune Campus). When **Najda-Vision** detects a fall or medical collapse, the map dynamically synchronizes traffic signal nodes along Boulevard Mekka into an animated **Green-Wave Emergency Corridor**.
-- **Confirmed Decision 4 — Frugal WhatsApp/Telegram Webhook Dispatch & JSON Inspector**: Critical alerts generate structured emergency payloads for Protection Civile and municipal security via simulated WhatsApp Cloud API and Telegram Bot webhooks, complete with a live JSON payload inspector and interactive test-trigger controls.
-
----
-
-### 1. Overview & Core Concept
-
-- **What It Does**:
-  1. **CNDP Law 09-08 Privacy-First Compliance Engine**: By default, every detected citizen's head/face region is masked in real time with a Gaussian blur and annotated with a green `CNDP-0908 PRIVACY` compliance label. The privacy mask automatically lifts **only** on the specific bounding box that triggers a verified critical alert (medical collapse or security threat), while keeping bystanders blurred.
-  2. **Mode 1 — Najda-Vision (Fall & Medical Collapse Triage)**: Analyzes human skeletal posture (head-to-hip aspect ratio, torso inclination angle, and rapid vertical drop velocity via `yolov8n-pose.pt` keypoints) to detect pedestrian falls, heatstroke collapses, or traffic accidents. Immediately dispatches a Protection Civile alert and activates the Boulevard Mekka Green-Wave traffic corridor.
-  3. **Mode 2 — Tifawt-Guard (Missing Child & Vulnerable Senior Locator)**: Performs real-time HSV color space segmentation on torso regions between shoulder and hip keypoints across six target clothing profiles (**Red, Blue, Yellow, Black, White, Green**) to locate missing children or disoriented seniors across municipal cameras without exposing biometric facial data.
-  4. **Mode 3 — Critical Infrastructure Security Guard**: Protects restricted zones (such as the ONEE Desalination Plant and University Server Rooms) by combining upper-face HSV/luminance concealment analysis (detecting ski masks/balaclavas where facial skin ratio drops below threshold) with `yolov8n.pt` object detection for bladed weapons and unauthorized intrusion.
-- **Target Audience / Persona**: Municipal operators at the Laâyoune Smart City Command Center, Protection Civile emergency dispatchers, and edge AI engineers deploying frugal computer vision on existing CCTV infrastructure.
-- **Key Value**: Delivers sub-33ms (30+ FPS) emergency triage and missing-person search using existing municipal cameras and zero-cost messaging webhooks, while strictly enforcing Moroccan CNDP Law 09-08 citizen privacy by design.
+- **Confirmed Decision 1 — Scene-Scale Router with 60-Frame Peak-Height Hysteresis**: Instead of evaluating the $28\%$ height threshold on a single instantaneous frame (which could drop below $28\%$ when a close-up person collapses forward onto the floor), the router tracks the **rolling peak subject height over a trailing 60-frame window (plus session peak memory)**. Once `Close-Up Mode` is triggered, hysteresis locks the scene in `Close-Up Mode` throughout the collapse so it can never flip to `Wide Crowd Mode` mid-fall.
+- **Confirmed Decision 2 — 1.5–2.0s Temporal Immobility Gate Before Immutable Faint Lock**: To prevent false alarms when someone casually bends down to tie a shoe or pick up an object, mechanical collapse signals (head drop $\ge 18\%$, height compression $\ge 28\%$, floor-zone entry) first enter a 1.5–2.0 second **Pending Floor Verification (`Analyzing Potential Collapse...`)** stage requiring continuous floor-zone presence and low kinetic motion (immobility) before committing to the immutable Red `FAINT DETECTED` lock.
+- **Confirmed Decision 3 — IoU-Gated ($\text{IoU} > 0.35$) Soft Blending for Asynchronous Neural Updates**: Server-side `/api/analyze-frame` responses carry their capture timestamp and are reconciled using **IoU overlap gating ($\text{IoU} > 0.35$)** and smooth Exponential Moving Average (EMA) position blending rather than hard coordinate overwriting, preventing bounding boxes from snapping or teleporting when students run across the gym during a 400–1000 ms inference round-trip.
 
 ---
 
-### 2. User Experience & Visual Design
+## 1. Overview & Core Concept
+
+- **What It Does**: Provides an intelligent, real-time Smart City and School safety monitoring console for Laâyoune, Morocco that processes uploaded test videos, live webcam feeds, and simulated scenarios to detect faints/medical collapses, locate missing persons by clothing color, and guard restricted zones.
+- **Target Audience / Persona**: Municipal emergency dispatchers (Protection Civile Laâyoune), school safety coordinators (Lycée Hassan II), and computer vision engineers testing edge-to-cloud video analytics.
+- **Key Value**: Delivers reliable, zero-jitter person and faint tracking across any camera angle while automatically clearing a 5-turn **Hospital $\rightarrow$ School Green Zone** and stopping opposing traffic in **Red** with live ambulance tracking.
+
+---
+
+## 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. **Video Source Selection & Calibration**: The operator selects **Live Webcam**, uploads a **Custom Test Video** (MP4/WebM), or uses the **Interactive Scenario Calibrator** on the primary viewport canvas. Real-time computer vision overlays render bounding boxes, skeletal pose keypoints, torso HSV color swatches, and Gaussian face blurs directly on the 60 FPS HTML5 canvas.
-  2. **Operational Mode Switching**: Using the segmented mode controller in the workspace toolbar, the operator switches between **Mode 1: Najda-Vision**, **Mode 2: Tifawt-Guard** (selecting target clothing color: Red, Blue, Yellow, Black, White, or Green), and **Mode 3: Infrastructure Guard**.
-  3. **Incident Triage & Green-Wave Activation**: When a fall is detected in the video feed (or triggered via the incident test bench), the subject's bounding box switches from green (`CNDP-0908 PRIVACY` blurred) to crimson (`CRITICAL ALERT — UNMASKED FOR TRIAGE`), the **Boulevard Mekka Green-Wave Corridor** animates sequential green traffic lights from Protection Civile HQ to the incident camera node, and a WhatsApp/Telegram webhook payload appears in the dispatch inspector.
-  4. **Python Edge Source Export**: Switching to the **Python OpenVINO Engine** view lets the engineer inspect and download the complete `vision_engine.py` (`SahraEyeEngine` class with OpenVINO export/fallback, HSV torso masking, pose fall heuristics, and CNDP Gaussian blur) and `app.py` (FastAPI `/video_feed` MJPEG generator and `/telemetry` endpoints).
-
+  1. **Upload & Auto-Scale Lock**: The operator uploads a close-up room video or a wide-angle school gymnasium video. The engine evaluates the rolling 60-frame peak subject height and locks the appropriate scale mode (`Close-Up Room` vs. `Wide-Angle Crowd`).
+  2. **Standing & Active Tracking**: Standing individuals are tracked with smooth bounding boxes and proportionally scaled, EMA-stabilized skeletons.
+  3. **Two-Stage Faint Verification (1.5–2.0s Immobility Gate $\rightarrow$ Immutable Lock)**:
+     - *Stage A (Collapse / Bending Detected, $0.0\text{s} \rightarrow 1.6\text{s}$)*: Bounding box shifts to Amber (`Verifying Floor Immobility...`) while measuring whether the person stays on the floor with near-zero velocity.
+     - *Stage B (Confirmed Faint, $\ge 1.6\text{s}$ Continuous Floor Immobility)*: Commits to the immutable Crimson Red (`#EF4444`) `FAINT DETECTED` lock, freezes the zero-jitter anatomical floor skeleton inside the box indefinitely, and displays the **Last Standing Position** ghost box.
+  4. **Automated Laâyoune Green-Wave Dispatch**: Upon confirmed faint lock, the 5-turn route from **Hôpital Moulay Hassan** to **Lycée Hassan II School** turns into a glowing **Green Zone**, opposing and cross streets turn **Red** (stopping opposing vehicles), and the **Ambulance GPS Tracker (`AMB-LAA-01`)** navigates all 5 turns to the school.
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: High-precision civic command center and hardware telemetry console—clean, utilitarian, high-contrast dark slate surfaces with zero decorative clutter.
-  - *Color Palette & Mood*:
-    - **60% Dominant Neutral Canvas**: Deep obsidian slate (`#0B0F17`) main viewport background and dark graphite (`#111827`) structural workspace panels.
-    - **30% Structural Surfaces**: Crisp `1px solid #1E293B` hairline dividers, `#161F30` interactive control surfaces, and high-legibility cool off-white (`#F8FAFC`) and muted slate (`#94A3B8`) typography.
-    - **10% Semantic Accent Budget**:
-      - **Nominal / CNDP Law 09-08 Privacy Active & Green-Wave Signal**: Emerald (`#10B981`)
-      - **Tifawt-Guard Target Match / Warning**: Amber Gold (`#F59E0B`)
-      - **Critical Triage Alert (Fall Detected / Weapon / Concealed Face)**: Crimson (`#EF4444`)
-      - **Intel OpenVINO Edge Hardware Accent**: Electric Cyan (`#06B6D4`)
-  - *Typography & Hierarchy*:
-    - **Display & Navigation**: `Outfit` (600 SemiBold / 700 Bold) with optical tracking compensation for dark surfaces.
-    - **UI & Body Prose**: `Plus Jakarta Sans` (400 Regular / 500 Medium) for crisp scannability at 13px–15px.
-    - **Telemetry, Coordinates, FPS & JSON Payloads**: `JetBrains Mono` with `font-variant-numeric: tabular-nums` so frame times, GPS coordinates, HSV thresholds, and countdown timers never jitter.
-  - *Component Styling & Layout*:
-    - Full-viewport 1440px desktop command layout following a strict 3-zone Top Bar Contract (`Sahra-Eye` wordmark — single-line navigation links for `Live Command`, `Laâyoune Corridor Map`, `Webhook Inspector`, `Python OpenVINO Source` — and `Export Edge Package` primary button).
-    - Single-elevation panels separated by `1px` borders; metadata rendered as clean inline text with `·` separators rather than pill badges.
-
-- **Interactive Feedback & Motion**:
-  - Real-time HTML5 Canvas overlay rendering Gaussian face blur regions, skeletal pose vectors, torso HSV sampling boxes, and CNDP-0908 compliance labels at 30–60 FPS.
-  - Smooth `< 150ms` transitions when switching modes, filtering target clothing colors, or inspecting webhook JSON payloads.
+  - *Aesthetic Direction*: Clean, high-contrast municipal operations dashboard with plain-English controls and zero technical clutter.
+  - *Color Palette & Mood*: Deep slate canvas (`#0B0F17`), structural card surfaces (`#111827`) with `1px` borders (`#1E293B`), cyan primary controls (`#06B6D4`), emerald green (`#10B981`) for safe standing states and open ambulance corridors, amber (`#F59E0B`) for pending fall verification and clothing matches, and crimson (`#EF4444`) for locked faint alerts and stopped cross-traffic.
+  - *Typography & Hierarchy*: `Plus Jakarta Sans` for crisp UI headings and labels, paired with `JetBrains Mono` (`tabular-nums`) for FPS counters, video timestamps, and ambulance ETA countdowns.
+  - *Component Styling & Layout*: 1440px desktop container with a 3-zone top navigation bar, 3 plain-language mode selector cards, and a balanced 12-column workspace (7 columns for the Vision Player, 5 columns for the Live Alert Banner, 5-Turn Laâyoune Traffic Map, and Mobile Alert Log).
+- **Interactive Feedback & Motion**: Smooth timeline scrubbing for uploaded videos, visual countdown progress during the 1.5–2.0s immobility verification window, pulsing locator ring on fainted individuals in crowd scenes, and 30 FPS traffic simulation on the Laâyoune map.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
+## 3. Key Product Decisions & Blind-Spot Mitigations
 
-- **Decision 1 — Real-Time Browser CV Pipeline Paired with Production Python OpenVINO Code**:
-  - *Chosen Approach*: Run an authentic client-side computer vision pipeline on `<canvas>` (performing real pixel-level HSV color segmentation on uploaded videos/webcam feeds, motion/posture bounding box analysis, and real Gaussian pixel blurring on head regions) while providing the complete, downloadable Python `vision_engine.py` and `app.py` engineered for `ultralytics` YOLOv8 + Intel OpenVINO (`yolov8n_openvino_model/`).
-  - *Why*: Allows immediate, zero-latency interactive testing with your webcam and custom test videos right in the web preview while giving you the exact Python FastAPI + OpenCV + OpenVINO files required for local deployment on your Intel Core i7 machine.
-  - *Alternatives Considered*: Static video mocks (rejected because they cannot process your live webcam or custom uploaded video files) or cloud-only frame inference (rejected because it violates the zero-cloud-latency and CNDP privacy-first edge architecture).
-
-- **Decision 2 — Selective CNDP Law 09-08 Privacy Unmasking State Machine**:
-  - *Chosen Approach*: Maintain a per-subject state machine where `privacy_masked = True` is enforced by default on the top 28% head/face ROI of every person bounding box (`cv2.GaussianBlur(roi, (51, 51), 30)` in Python and multi-pass Gaussian canvas filter in the web engine). Only when `alert_active == True` for that specific track ID does `privacy_masked` flip to `False`, logging an immutable timestamped entry in the CNDP Compliance Audit Trail.
-  - *Why*: Demonstrates verifiable legal compliance with Moroccan Law 09-08 (protection of individuals with regard to the processing of personal data) while ensuring emergency responders can visually assess a collapsed pedestrian or armed intruder.
+| Component | Potential Risk | Implemented Mitigation in Architecture |
+| :--- | :--- | :--- |
+| **Scale Threshold Transition ($\ge 28\%$)** | If a person collapses forward or toward the camera, their instantaneous vertical height can drop below $28\%$, inadvertently triggering a mid-video switch to `Wide Crowd Mode`. | **60-Frame Trailing Peak-Height Hysteresis**: Scale mode is governed by $\max_{t-60 \le k \le t}(h_k)$ and latched once `Close-Up Mode` is entered. Even if a collapsing subject compresses to $14\%$ of frame height on the floor, the scene remains locked in `Close-Up Mode`. |
+| **Heuristic Triggers for Close-Up Faints** | Mechanical rules (head drop $\ge 18\%$, height compression $\ge 28\%$) could misfire if a person casually sits on the floor or bends down to pick something up. | **1.5–2.0s Temporal Immobility Gate**: Requires continuous floor-zone posture **plus** low kinetic pixel energy (immobility) for $1.5\text{–}2.0\text{ seconds}$ before committing to the immutable Red faint lock. Brief bends or crouches that recover within $<1.5\text{s}$ auto-cancel cleanly. |
+| **Asynchronous API Call Latency** | In wide-angle mode, server-side inference takes $400\text{–}1000\text{ ms}$. If KLT optical flow moves a student while waiting for the response, overwriting with stale coordinates causes boxes to snap/jitter. | **IoU-Gated ($\text{IoU} > 0.35$) Soft Interpolation**: KLT optical flow drives 30 FPS visual motion. Returning `/api/analyze-frame` boxes only update an existing moving track if $\text{IoU} > 0.35$ (blended smoothly at $\alpha = 0.25$), while forward-projecting the box by the track's optical-flow displacement $\Delta x, \Delta y$ accumulated since the snapshot timestamp. |
 
 ---
 
-### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+## 4. Technical Architecture & Data Strategy *(Technical Reference)*
 
-- **Architecture & Component Diagram**:
+### Architecture & Component Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                         SAHRA-EYE SMART CITY COMMAND CONSOLE                         │
-│   Top Bar: [Sahra-Eye] ── [Live Command | Corridor Map | Webhooks | Python Code]     │
-└───────────────┬──────────────────────────────────────────────────────┬───────────────┘
-                │                                                      │
-                ▼                                                      ▼
-┌───────────────────────────────────────────┐        ┌─────────────────────────────────┐
-│     VIDEO INGESTION & EDGE CV CANVAS      │        │  LAÂYOUNE TACTICAL TELEMETRY    │
-│ ┌───────────────────────────────────────┐ │        │ ┌─────────────────────────────┐ │
-│ │ Input Source Controller               │ │        │ │ Boulevard Mekka Interactive │ │
-│ │ • Live Webcam (getUserMedia)          │ │        │ │ Vector Map & Camera Nodes   │ │
-│ │ • Custom Video Upload (MP4/WebM)      │ │        │ │ • Green-Wave Signal Sync    │ │
-│ │ • Interactive Incident Simulator      │ │        │ │ • Protection Civile Route   │ │
-│ └──────────────────┬────────────────────┘ │        │ └──────────────┬──────────────┘ │
-│                    ▼                      │        │                ▼                │
-│ ┌───────────────────────────────────────┐ │        │ ┌─────────────────────────────┐ │
-│ │ Real-Time Vision Pipeline (<canvas>)  │ │        │ │ Frugal Webhook Dispatcher   │ │
-│ │ • CNDP-0908 Gaussian Face Blur ROI    │ │        │ │ • WhatsApp / Telegram JSON  │ │
-│ │ • Mode 1: Pose Aspect/Velocity Fall   │ │───────►│ │ • CNDP-0908 Unmask Audit    │ │
-│ │ • Mode 2: Torso HSV Color Threshold   │ │ Alerts │ └─────────────────────────────┘ │
-│ │ • Mode 3: Mask Concealment & Weapon   │ │        └─────────────────────────────────┘
-│ └───────────────────────────────────────┘ │
-└───────────────────────────────────────────┘
-                │
-                ▼
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                 DOWNLOADABLE PYTHON EDGE ENGINE (OpenVINO + FastAPI)                 │
-│  ┌──────────────────────────────────────┐    ┌─────────────────────────────────────┐ │
-│  │ vision_engine.py (SahraEyeEngine)    │    │ app.py (FastAPI Server)             │ │
-│  │ • YOLOv8n + YOLOv8n-Pose -> OpenVINO │◄───│ • GET /video_feed (MJPEG 30+ FPS)   │ │
-│  │ • Intel Core i7 CPU/iGPU AUTO device │    │ • GET /telemetry (JSON State)       │ │
-│  │ • HSV Torso Mask & Fall Pose Math    │    │ • POST /mode & /target_color        │ │
-│  └──────────────────────────────────────┘    └─────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        VIDEO INPUT & FRAME CAPTURE                         │
+│        Uploaded Video File (Primary)  │  Live Webcam  │  Demo Scene        │
+└───────────────────────────────────────┬────────────────────────────────────┘
+                                        │ 960×540 Frame @ 30 FPS
+                                        ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│          DUAL-SCALE SCENE ROUTER (WITH 60-FRAME PEAK HYSTERESIS)           │
+│   Rolling Peak Height Buffer: H_peak = max(height[t - 60 ... t], H_latched)│
+│   ├── H_peak >= 28% Frame H ──► CLOSE-UP MODE (Latched Hysteresis)         │
+│   │                             • Sub-tile slicing & small blobs DISABLED  │
+│   │                             • Containment NMS merges nested sub-boxes  │
+│   └── H_peak <  28% Frame H ──► WIDE CROWD MODE (25-Student Gym Pipeline)  │
+│                                 • KLT Optical Flow @ 30 FPS                │
+│                                 • Async /api/analyze-frame (IoU > 0.35)    │
+└───────────────────────────────────────┬────────────────────────────────────┘
+                                        │
+                                        ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│        TWO-STAGE TEMPORAL IMMOBILITY & INDEFINITE FAINT-LOCK ENGINE        │
+│  1. Collapse Candidate Detected (Head Drop / Compression / Prone Aspect)   │
+│  2. Temporal Immobility Gate (1.5–2.0s continuous floor presence + low v)  │
+│     ├── Moves / Stands Up < 1.5s ──► Cancel candidate, resume Standing     │
+│     └── Stationary on Floor >= 1.5s ──► COMMIT IMMUTABLE FAINT LOCK        │
+│         • Locks faintLockedBbox & zero-jitter floor skeleton indefinitely  │
+│         • Unlocks ONLY if person stands back up (15+ upright frames)       │
+└───────────────────┬───────────────────────────────────┬────────────────────┘
+                    │                                   │
+                    ▼                                   ▼
+┌───────────────────────────────────────┐ ┌──────────────────────────────────┐
+│     VISION CANVAS OVERLAY RENDERER    │ │   LAÂYOUNE 5-TURN TRAFFIC MAP    │
+│ • Proportional EMA Skeletons          │ │ • Hospital -> School GREEN ZONE  │
+│ • Amber Verification -> Red Lock      │ │ • Opposite & Cross Routes RED    │
+│ • Pulsing Red Faint Beacon            │ │ • Live Ambulance GPS Tracker     │
+└───────────────────────────────────────┘ └──────────────────────────────────┘
 ```
 
-- **Data Model & State**:
-  - **EngineState (`TelemetryPayload`)**:
-    - `activeMode`: `'najda' | 'tifawt' | 'security'`
-    - `targetColor`: `'RED' | 'BLUE' | 'YELLOW' | 'BLACK' | 'WHITE' | 'GREEN'`
-    - `inputSource`: `'webcam' | 'upload' | 'simulation'`
-    - `fps`: `number` (tabular real-time frame rate counter)
-    - `inferenceMs`: `number` (OpenVINO / Canvas frame latency in milliseconds)
-    - `cndpMaskedCount`: `number` (citizens currently protected by Gaussian blur)
-    - `unmaskedAlertCount`: `number` (bounding boxes unmasked due to critical trigger)
-    - `greenWaveActive`: `boolean` (whether Boulevard Mekka traffic corridor is synchronized)
-    - `greenWaveNodes`: Array of 5 Boulevard Mekka intersections (`Place El Méchouar`, `Croisement Av. Hassan II`, `Rond-Point Bd Mekka Central`, `Carrefour Hôpital Moulay Hassan`, `Accès Protection Civile`) with live signal state (`RED | GREEN_WAVE`) and ambulance ETA.
-  - **DetectedSubject**:
-    - `id`: Track identifier
-    - `bbox`: `[x, y, width, height]`
-    - `headRoi`: `[hx, hy, hw, hh]`
-    - `keypoints`: 17 COCO pose coordinates (nose, shoulders, hips, knees, ankles)
-    - `dominantTorsoColor`: Detected HSV color classification + match percentage
-    - `isFallen`: Boolean computed from bounding-box width-to-height ratio (`w / h > 1.25`) and shoulder-to-hip vertical collapse
-    - `hasSecurityThreat`: Boolean computed from upper-face concealment or weapon detection
-    - `cndpBlurred`: Boolean (`!isFallen && !hasSecurityThreat`)
-  - **WebhookDispatchEvent**:
-    - `id`, `timestamp`, `channel` (`'WhatsApp Cloud API' | 'Telegram Bot API'`), `mode`, `cameraNode`, `gpsCoordinates`, `cndpUnmaskReason`, and full `jsonPayload`.
+### Data Model & State
 
-- **Interactive Component & State Mapping**:
-  - **Video Source Switcher**: Clicking `Use My Webcam` requests camera permissions via `navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })` and pipes frames into the vision processor; clicking `Upload Test Video` opens a file input accepting `.mp4, .webm, .mov` and runs the real-time pixel HSV and bounding-box analyzer on the uploaded video playback; built-in playback controls allow pausing, scrubbing, and injecting test subjects (e.g., triggering a pedestrian collapse, spawning subjects with Red/Blue/Yellow/Green/Black/White shirts, or simulating a masked intruder in a restricted zone).
-  - **Mode & HSV Color Selector**: Switching modes immediately updates the active CV pipeline rules. In **Mode 2 (Tifawt-Guard)**, clicking any of the 6 target colors (`Red`, `Blue`, `Yellow`, `Black`, `White`, `Green`) adjusts the live HSV threshold filter and highlights matching torso regions in the video stream while keeping non-critical faces blurred under CNDP-0908.
-  - **Boulevard Mekka Interactive Map**: Clicking any camera or traffic intersection node on the Laâyoune map switches the active camera telemetry context or manually tests the Green-Wave signal cascade along Boulevard Mekka.
-  - **Webhook & CNDP Audit Inspector**: Selecting any dispatched alert inspects the exact JSON webhook payload ready for WhatsApp/Telegram integration, with one-click copy and manual webhook test dispatch.
-  - **Python Source Code Exporter**: Provides full syntax-highlighted views and one-click `.py` file downloads for `vision_engine.py`, `app.py`, and `requirements.txt`.
+- **`ScaleHysteresisState`**:
+  - `trailingMaxHeights: number[]` (ring buffer of last 60 frames)
+  - `sessionPeakHeightRatio: number` (latches `Close-Up Mode` once $\ge 0.28$, preventing mid-collapse mode switches)
+- **`TrackedPersonState`**:
+  - `id`, `label`, `bbox`, `standingBaselineBbox`, `peakHeight`, `baselineTopY`
+  - `collapseCandidateStartMs: number | null` — tracks elapsed time in the floor/compressed posture
+  - `floorImmobilityScore: number` — measures low kinetic motion during the $1.5\text{–}2.0\text{s}$ verification window
+  - `isVerifyingFall: boolean` — true during the $0.3\text{s}\text{–}1.6\text{s}$ Amber verification window
+  - `isFallen: boolean`, `faintLockedBbox: [number, number, number, number] | null` — committed immutable Red lock once temporal persistence ($\ge 1.6\text{s}$) is satisfied
+- **`AsyncSnapshotHeader`**:
+  - Records `snapshotTimestampMs` and per-track positions at capture time so when `/api/analyze-frame` returns $400\text{–}1000\text{ ms}$ later, each returned box is compensated by the track's accumulated optical-flow drift $(\Delta x, \Delta y)$ and gated by $\text{IoU} > 0.35$.

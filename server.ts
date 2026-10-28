@@ -1,11 +1,21 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
 
 interface IncidentRecord {
   id: string;
@@ -24,15 +34,16 @@ const serverState = {
   targetColor: 'RED',
   greenWaveActive: false,
   greenWaveActivatedAt: null as number | null,
-  activeCameraId: 'cam-mekka-01',
+  activeCameraId: 'cam-school-01',
   incidents: [
     {
       id: 'inc-101',
       timestamp: '14:22:09',
       mode: 'najda',
-      title: 'Medical Emergency — Person Collapsed',
-      description: 'Ambulance dispatched to Boulevard Mekka. All 5 traffic lights switched to Green Wave.',
-      cameraName: 'Boulevard Mekka Crossing',
+      title: 'Medical Emergency — Person Fainted at Place du Méchouar',
+      description:
+        'Hospital → Place du Méchouar route turned GREEN. Opposite cross-traffic routes locked RED.',
+      cameraName: 'Place du Méchouar (Test Localization)',
       channel: 'WhatsApp',
       greenWaveTriggered: true,
     },
@@ -41,8 +52,8 @@ const serverState = {
       timestamp: '14:18:41',
       mode: 'tifawt',
       title: 'Missing Person Match — Red Shirt (89%)',
-      description: 'Located person wearing Red shirt at Place El Méchouar. Patrol notified.',
-      cameraName: 'Place El Méchouar Plaza',
+      description: 'Located person wearing Red shirt at Boulevard Mekka Crossing. Patrol notified.',
+      cameraName: 'Boulevard Mekka Crossing',
       channel: 'Telegram',
       greenWaveTriggered: false,
     },
@@ -55,11 +66,86 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  // Support base64 frame payloads up to 6MB
+  app.use(express.json({ limit: '6mb' }));
 
   // GET /api/state — Returns current backend state & incident log
   app.get('/api/state', (_req, res) => {
     res.json(serverState);
+  });
+
+  // POST /api/analyze-frame — Pre-Trained Multimodal Neural Person & Faint Detector
+  app.post('/api/analyze-frame', async (req, res) => {
+    try {
+      const { imageBase64 } = req.body || {};
+      if (!imageBase64 || typeof imageBase64 !== 'string') {
+        res.status(400).json({ error: 'Missing imageBase64' });
+        return;
+      }
+
+      const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: cleanBase64,
+              },
+            },
+            {
+              text:
+                'Detect every real human person (students, pedestrians, individuals) visible in this video frame. ' +
+                'Strictly ignore non-human objects such as basketball hoop poles, backboards, bleachers, doors, walls, or furniture. ' +
+                'For each real person, return their tight 2D bounding box [ymin, xmin, ymax, xmax] normalized from 0 to 1000, ' +
+                'and set status to "fainted" ONLY if that person is clearly lying collapsed/sprawled horizontally on the floor or ground; ' +
+                'otherwise set status to "standing".',
+            },
+          ],
+        },
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              people: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    box_2d: {
+                      type: Type.ARRAY,
+                      items: { type: Type.INTEGER },
+                      description: '[ymin, xmin, ymax, xmax] normalized 0 to 1000',
+                    },
+                    status: {
+                      type: Type.STRING,
+                      description: '"standing" or "fainted"',
+                    },
+                  },
+                  required: ['box_2d', 'status'],
+                },
+              },
+            },
+            required: ['people'],
+          },
+        },
+      });
+
+      const rawText = response.text || '{"people":[]}';
+      const parsed = JSON.parse(rawText);
+      res.json({ people: Array.isArray(parsed.people) ? parsed.people : [] });
+    } catch (err: any) {
+      res.status(200).json({
+        people: [],
+        fallback: true,
+        error: String(err?.message || err),
+      });
+    }
   });
 
   // POST /api/mode — Updates active operational mode & target shirt color
@@ -80,7 +166,8 @@ async function startServer() {
   // POST /api/corridor — Toggles Boulevard Mekka Green-Wave Traffic Corridor
   app.post('/api/corridor', (req, res) => {
     const { active } = req.body || {};
-    serverState.greenWaveActive = typeof active === 'boolean' ? active : !serverState.greenWaveActive;
+    serverState.greenWaveActive =
+      typeof active === 'boolean' ? active : !serverState.greenWaveActive;
     serverState.greenWaveActivatedAt = serverState.greenWaveActive ? Date.now() : null;
     res.json({
       greenWaveActive: serverState.greenWaveActive,
@@ -94,13 +181,12 @@ async function startServer() {
       mode = serverState.mode,
       title = 'Smart City Alert',
       description = 'Automated incident detected.',
-      cameraName = 'Boulevard Mekka Crossing',
+      cameraName = 'Place du Méchouar (Test Localization)',
       channel = 'WhatsApp',
       force = false,
     } = req.body || {};
 
     const now = Date.now();
-    // 6-second server-side debounce for automatic vision triggers unless manually forced
     if (!force && now - (lastWebhookByMode[mode] || 0) < 6000) {
       res.json({ skipped: true, reason: 'Cooldown active', incidents: serverState.incidents });
       return;

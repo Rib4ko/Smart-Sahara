@@ -25,6 +25,8 @@ export interface DetectedSubject {
   headDropPct: number;
   heightCompressionPct: number;
   aspectRatio: number;
+  isVerifyingFall?: boolean;
+  verifyProgressSec?: number;
   isFallen: boolean;
   isMemoryLocked: boolean;
   faintDurationSec: number;
@@ -84,8 +86,8 @@ export const LAAYOUNE_CAMERA_NODES: CameraSectorNode[] = [
   {
     id: 'cam-school-01',
     code: 'CAM-01',
-    name: 'Lycée Hassan II School (Test Localization)',
-    sector: 'School Zone · Laâyoune',
+    name: 'Place du Méchouar (Test Localization)',
+    sector: 'Central Plaza · Laâyoune',
     coordinates: 'Laâyoune, Morocco',
     xPct: 48,
     yPct: 46,
