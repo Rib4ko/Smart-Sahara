@@ -1,0 +1,6 @@
+{
+  "name": "Sahra-Eye — Laâyoune Smart City Edge AI Vision Engine",
+  "description": "High-performance, CNDP Law 09-08 privacy-compliant Smart City surveillance and emergency triage platform for Laâyoune, Morocco, powered by Intel OpenVINO, YOLOv8, and OpenCV.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
